@@ -2,6 +2,8 @@
 
 Multi-agent dispatch and coordination for [agent-shell](https://github.com/nicholasrq/agent-shell). Spawn parallel AI agents from Emacs, coordinate their work, and visualize progress with a live SVG task graph rendered in the agent-shell header.
 
+![example-header](./docs/example-header.png)
+
 ## Features
 
 - **Parallel agent spawning** -- launch background agent-shell sessions that work independently
@@ -10,8 +12,6 @@ Multi-agent dispatch and coordination for [agent-shell](https://github.com/nicho
 - **Permission forwarding** -- tool permission requests from background agents surface as interactive button dialogs in the dispatcher buffer (with ediff support for file diffs)
 - **Inter-agent messaging** -- typed message protocol for progress reports, error reports, input requests, and batch milestones
 - **Dispatcher pattern** -- the primary agent coordinates without implementing, delegating work to sub-agents
-
-![example-header](./docs/example-header.png)
 
 ## Installation
 
