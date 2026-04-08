@@ -2,7 +2,7 @@
 
 Multi-agent dispatch and coordination for [agent-shell](https://github.com/nicholasrq/agent-shell). Spawn parallel AI agents from Emacs, coordinate their work, and visualize progress with a live SVG task graph rendered in the agent-shell header.
 
-![example-header](./docs/example-header.png)
+<img src="https://raw.githubusercontent.com/cassandracomar/agent-shell-dispatch/refs/heads/main/docs/example-header.png?sanitize=true" alt="GOES17"> 
 
 ## Features
 
