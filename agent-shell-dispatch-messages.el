@@ -130,7 +130,7 @@ Default is no-op."
 
 (cl-defmethod agent-shell-dispatch-msg-render
   ((msg agent-shell-dispatch-msg-input-needed))
-  "Render input-needed as question with context."
+  "Render input-needed MSG as question with context."
   (let ((q (agent-shell-dispatch-msg-input-needed-question msg))
         (ctx (agent-shell-dispatch-msg-input-needed-context msg)))
     (concat (propertize "❓ " 'font-lock-face 'warning)
@@ -139,7 +139,7 @@ Default is no-op."
 
 (cl-defmethod agent-shell-dispatch-msg-render
   ((msg agent-shell-dispatch-msg-batch-progress))
-  "Render batch progress as milestone line."
+  "Render batch progress MSG as milestone line."
   (let ((phase (agent-shell-dispatch-msg-batch-progress-phase msg))
         (done (agent-shell-dispatch-msg-batch-progress-completed msg))
         (total (agent-shell-dispatch-msg-batch-progress-total msg)))
@@ -149,27 +149,27 @@ Default is no-op."
 
 (cl-defmethod agent-shell-dispatch-msg-render
   ((msg agent-shell-dispatch-msg-batch-completed))
-  "Render batch completed as summary."
+  "Render batch completed MSG as summary."
   (concat (propertize "✅ " 'font-lock-face 'success)
           (propertize "Batch complete: " 'font-lock-face 'bold)
           (agent-shell-dispatch-msg-batch-completed-summary msg)))
 
 (cl-defmethod agent-shell-dispatch-msg-render
   ((msg agent-shell-dispatch-msg-task-progress))
-  "Render task progress as phase milestone."
+  "Render task progress MSG as phase milestone."
   (concat (propertize "📋 " 'font-lock-face 'success)
           (agent-shell-dispatch-msg-task-progress-phase msg)))
 
 (cl-defmethod agent-shell-dispatch-msg-render
   ((msg agent-shell-dispatch-msg-task-completed))
-  "Render task completed as summary."
+  "Render task completed MSG as summary."
   (concat (propertize "✅ " 'font-lock-face 'success)
           (propertize "Task complete: " 'font-lock-face 'bold)
           (agent-shell-dispatch-msg-task-completed-summary msg)))
 
 (cl-defmethod agent-shell-dispatch-msg-render
   ((msg agent-shell-dispatch-msg-error))
-  "Render error with description and context."
+  "Render error MSG with description and context."
   (let ((desc (agent-shell-dispatch-msg-error-description msg))
         (ctx (agent-shell-dispatch-msg-error-context msg)))
     (concat (propertize "❌ " 'font-lock-face 'error)
@@ -183,7 +183,8 @@ Default is no-op."
 
 (defun agent-shell-dispatch-msg--cleanup-permission
     (perm-id target-buf agent-buf option-id)
-  "Remove the permission dialog identified by PERM-ID from TARGET-BUF."
+  "Remove the permission dialog identified by PERM-ID from TARGET-BUF.
+AGENT-BUF and OPTION-ID label the replacement text."
   (when-let* ((buf (get-buffer target-buf)))
     (with-current-buffer buf
       (save-excursion
@@ -202,7 +203,8 @@ Default is no-op."
 
 (defun agent-shell-dispatch-msg--make-respond-action
     (respond option-id agent-buf perm-id target-name)
-  "Create a permission button action that responds and cleans up."
+  "Create a permission button action calling RESPOND and cleaning up.
+OPTION-ID, AGENT-BUF, PERM-ID, and TARGET-NAME identify the dialog."
   (lambda ()
     (interactive)
     (funcall respond option-id)
@@ -214,7 +216,9 @@ Default is no-op."
 
 (defun agent-shell-dispatch-msg--make-permission-buttons
     (options keymap respond agent-buf perm-id target-name)
-  "Build permission button string from OPTIONS, binding keys in KEYMAP."
+  "Build permission button string from OPTIONS, binding keys in KEYMAP.
+RESPOND is called with the chosen option-id.  AGENT-BUF, PERM-ID, and
+TARGET-NAME are forwarded to the response action."
   (mapconcat
    (lambda (opt)
      (let ((action (agent-shell-dispatch-msg--make-respond-action
@@ -235,7 +239,9 @@ Default is no-op."
 (defun agent-shell-dispatch-msg--make-view-button
     (diff options respond keymap agent-buf perm-id target-name)
   "Create a View (v) button that opens ediff for DIFF.
-OPTIONS and RESPOND are used to wire accept/reject in the ediff session."
+OPTIONS and RESPOND wire accept/reject in the ediff session.
+KEYMAP receives the `v' binding.  AGENT-BUF, PERM-ID, and TARGET-NAME
+identify the dialog to remove on accept/reject."
   (let* ((old (map-elt diff :old))
          (new (map-elt diff :new))
          (file (map-elt diff :file))
@@ -283,7 +289,7 @@ OPTIONS and RESPOND are used to wire accept/reject in the ediff session."
 
 (cl-defmethod agent-shell-dispatch-msg-render
   ((msg agent-shell-dispatch-msg-permission))
-  "Render permission as interactive button block.
+  "Render permission MSG as interactive button block.
 Returns propertized text with keymap for button interaction."
   (let* ((tool-call (agent-shell-dispatch-msg-permission-tool-call msg))
          (options (agent-shell-dispatch-msg-permission-options msg))
@@ -324,14 +330,14 @@ Returns propertized text with keymap for button interaction."
 
 (cl-defmethod agent-shell-dispatch-msg-handle
   ((msg agent-shell-dispatch-msg-permission) _target-buf)
-  "Track agent as having a pending permission."
+  "Track MSG agent as having a pending permission."
   (cl-pushnew (agent-shell-dispatch-msg-agent-buffer msg)
               agent-shell-dispatch-msg--pending-permission-agents
               :test #'equal))
 
 (cl-defmethod agent-shell-dispatch-msg-send
   ((msg agent-shell-dispatch-msg-permission) target-buf)
-  "Send permission MSG: render with frame, insert, handle.
+  "Send permission MSG to TARGET-BUF: render with frame, insert, handle.
 Permission render returns text with embedded keymap that must be preserved."
   (when-let* ((buf (get-buffer target-buf)))
     (let* ((body (agent-shell-dispatch-msg-render msg))
@@ -351,7 +357,7 @@ Permission render returns text with embedded keymap that must be preserved."
 
 (cl-defmethod agent-shell-dispatch-msg-handle
   ((msg agent-shell-dispatch-msg-input-needed) target-buf)
-  "Queue the question to the dispatcher agent."
+  "Queue MSG question to the dispatcher agent in TARGET-BUF."
   (when-let* ((buf (get-buffer target-buf)))
     (with-current-buffer buf
       (let ((agent (agent-shell-dispatch-msg-agent-buffer msg))

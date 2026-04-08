@@ -141,8 +141,8 @@ Returns a hash of id → `agent-shell-dispatch-render-task-status', or nil."
       sm)))
 
 (defun agent-shell-dispatch-start (dispatcher-buffer tasks &optional _interval)
-  "Start the dispatch task graph in the agent-shell header.
-DISPATCHER-BUFFER is the dispatcher's agent-shell buffer name.
+  "Start the dispatch task graph in the `agent-shell' header.
+DISPATCHER-BUFFER is the dispatcher's `agent-shell' buffer name.
 TASKS is a list of plists: ((:id ID :name NAME :agent AGENT-BUF) ...)."
   (agent-shell-dispatch-render-teardown)
   (setq agent-shell-dispatch-msg--pending-permission-agents nil)
@@ -189,7 +189,8 @@ TASKS is a list of plists: ((:id ID :name NAME :agent AGENT-BUF) ...)."
 
 ;; Backward-compat aliases for old skill API
 (defun agent-shell-dispatch-start-progress-polling (dispatcher-buffer agents &optional interval)
-  "Backward-compat wrapper. Converts alist to task plist format."
+  "Backward-compat wrapper converting AGENTS alist to task plists.
+DISPATCHER-BUFFER and INTERVAL are forwarded to `agent-shell-dispatch-start'."
   (agent-shell-dispatch-start dispatcher-buffer
                               (cl-loop for agent in agents
                                        for i from 1
@@ -218,9 +219,9 @@ Also stops dispatch polling. Returns the number of agents killed."
 ;; -- Start function for spawned agents --
 
 (defun agent-shell-dispatch-start-agent (config _arg &optional buffer-name)
-  "Start a new Claude agent-shell for dispatch.
-No window popup, no session prompt. Copies the session mode from the
-primary (dispatcher) buffer. Permissions are rendered in the dispatcher buffer.
+  "Start a new Claude `agent-shell' for dispatch using CONFIG.
+No window popup, no session prompt.  Copies the session mode from the
+primary (dispatcher) buffer.  Permissions are rendered in the dispatcher buffer.
 BUFFER-NAME, if provided, is incorporated into the buffer label."
   (let* ((cfg (copy-alist config))
          (mode-id (or (when-let* ((primary agent-shell-dispatch--primary-buffer)
@@ -266,7 +267,7 @@ Returns the buffer name."
     (when (buffer-live-p buf) (buffer-name buf))))
 
 (defun agent-shell-dispatch-list-agents ()
-  "List active agent-shell dispatch buffers.
+  "List active `agent-shell' dispatch buffers.
 Returns list of plists with :buffer and :status."
   (let (result)
     (dolist (buf (buffer-list))
