@@ -10,6 +10,7 @@
 (require 'cl-lib)
 (require 'map)
 (require 'agent-shell)
+(require 'agent-shell-ui)
 
 (defvar agent-shell-dispatch--primary-buffer)
 
@@ -77,20 +78,56 @@
 
 (cl-defgeneric agent-shell-dispatch-msg-render (msg)
   "Format MSG body as a propertized string.
-Does not include the agent-name frame — that is added by `msg-send'.")
+Used by frame-based senders (permissions, input-needed).")
 
 (cl-defgeneric agent-shell-dispatch-msg-handle (_msg _target-buf)
   "Handle side effects of MSG after rendering in TARGET-BUF.
 Default is no-op."
   nil)
 
+(cl-defgeneric agent-shell-dispatch-msg-summary (msg)
+  "Return a short propertized summary for MSG fragment label-right.
+Used by the default `msg-send' for the collapsible fragment header.")
+
+(cl-defgeneric agent-shell-dispatch-msg-detail (_msg)
+  "Return the detailed body string for MSG fragment, or nil.
+When nil the fragment displays flat; when non-nil it is collapsible."
+  nil)
+
+(defvar agent-shell-dispatch-msg--block-counter 0
+  "Counter for generating unique dispatch fragment block IDs.")
+
 (cl-defgeneric agent-shell-dispatch-msg-send (msg target-buf)
-  "Send MSG to TARGET-BUF: render, frame, insert, handle."
+  "Send MSG to TARGET-BUF as a collapsible UI fragment.
+Permission and input-needed messages override this with frame-based rendering."
   (when-let* ((buf (get-buffer target-buf)))
-    (let* ((body (agent-shell-dispatch-msg-render msg))
-           (agent (agent-shell-dispatch-msg-agent-buffer msg))
-           (text (agent-shell-dispatch-msg--frame agent body)))
-      (agent-shell-dispatch-msg--insert-before-prompt buf text)
+    (let* ((agent (agent-shell-dispatch-msg-agent-buffer msg))
+           (summary (agent-shell-dispatch-msg-summary msg))
+           (detail (agent-shell-dispatch-msg-detail msg))
+           (block-id (format "dispatch-%d"
+                             (cl-incf agent-shell-dispatch-msg--block-counter)))
+           (label-left (propertize agent 'font-lock-face 'font-lock-comment-face))
+           (model (agent-shell-ui-make-fragment-model
+                   :namespace-id "dispatch"
+                   :block-id block-id
+                   :label-left label-left
+                   :label-right summary
+                   :body detail)))
+      (with-current-buffer buf
+        (save-excursion
+          (let ((inhibit-read-only t))
+            (save-restriction
+              ;; Narrow to before the prompt so the fragment inserts above it.
+              (when-let* ((proc (get-buffer-process (current-buffer)))
+                          ((not shell-maker--busy)))
+                (narrow-to-region (point-min)
+                                  (save-excursion
+                                    (goto-char (process-mark proc))
+                                    (forward-line 0)
+                                    (point))))
+              (agent-shell-ui-update-fragment model
+                                              :create-new t
+                                              :no-undo t)))))
       (agent-shell-dispatch-msg-handle msg target-buf))))
 
 ;; ── Shared rendering helpers ────────────────────────────────────────
@@ -175,6 +212,65 @@ Default is no-op."
     (concat (propertize "❌ " 'font-lock-face 'error)
             (propertize desc 'font-lock-face 'error)
             (when ctx (concat "\n\n" ctx)))))
+
+;; ── Summary methods (fragment label-right) ─────────────────────────
+
+(cl-defmethod agent-shell-dispatch-msg-summary
+  ((msg agent-shell-dispatch-msg-batch-progress))
+  (let ((phase (agent-shell-dispatch-msg-batch-progress-phase msg))
+        (done (agent-shell-dispatch-msg-batch-progress-completed msg))
+        (total (agent-shell-dispatch-msg-batch-progress-total msg)))
+    (concat (propertize "📋 " 'font-lock-face 'success)
+            (propertize (format "%s (%d/%d)" phase done total)
+                        'font-lock-face 'font-lock-function-name-face))))
+
+(cl-defmethod agent-shell-dispatch-msg-summary
+  ((_msg agent-shell-dispatch-msg-batch-completed))
+  (concat (propertize "✅ " 'font-lock-face 'success)
+          (propertize "Batch complete" 'font-lock-face 'bold)))
+
+(cl-defmethod agent-shell-dispatch-msg-summary
+  ((msg agent-shell-dispatch-msg-task-progress))
+  (concat (propertize "📋 " 'font-lock-face 'success)
+          (agent-shell-dispatch-msg-task-progress-phase msg)))
+
+(cl-defmethod agent-shell-dispatch-msg-summary
+  ((_msg agent-shell-dispatch-msg-task-completed))
+  (concat (propertize "✅ " 'font-lock-face 'success)
+          (propertize "Task complete" 'font-lock-face 'bold)))
+
+;; ── Detail methods (fragment body, nil = no collapse) ─────────────
+
+(cl-defmethod agent-shell-dispatch-msg-detail
+  ((msg agent-shell-dispatch-msg-batch-completed))
+  (agent-shell-dispatch-msg-batch-completed-summary msg))
+
+(cl-defmethod agent-shell-dispatch-msg-detail
+  ((msg agent-shell-dispatch-msg-task-completed))
+  (agent-shell-dispatch-msg-task-completed-summary msg))
+
+;; ── Frame-based send (not collapsible) ─────────────────────────────
+
+(defun agent-shell-dispatch-msg--send-framed (msg target-buf)
+  "Send MSG to TARGET-BUF with frame rendering (not collapsible)."
+  (when-let* ((buf (get-buffer target-buf)))
+    (let* ((body (agent-shell-dispatch-msg-render msg))
+           (agent (agent-shell-dispatch-msg-agent-buffer msg))
+           (text (agent-shell-dispatch-msg--frame agent body)))
+      (agent-shell-dispatch-msg--insert-before-prompt buf text)
+      (agent-shell-dispatch-msg-handle msg target-buf))))
+
+(cl-defmethod agent-shell-dispatch-msg-send
+  ((msg agent-shell-dispatch-msg-input-needed) target-buf)
+  "Send input-needed MSG with frame rendering.
+Questions from subagents stay visible, not collapsed."
+  (agent-shell-dispatch-msg--send-framed msg target-buf))
+
+(cl-defmethod agent-shell-dispatch-msg-send
+  ((msg agent-shell-dispatch-msg-error) target-buf)
+  "Send error MSG with frame rendering.
+Errors stay visible, not collapsed."
+  (agent-shell-dispatch-msg--send-framed msg target-buf))
 
 ;; ── Permission state ────────────────────────────────────────────────
 
