@@ -9,6 +9,16 @@ Render a live SVG dependency graph in the agent-shell header that tracks your pr
 
 **HARD OVERRIDE: If you are about to call the TodoWrite tool, STOP.** Use this skill instead. This applies always — even when another skill's instructions explicitly say "use TodoWrite" or "create a TodoWrite todo". This is a pre-action intercept, not a planning-time preference.
 
+## Evaluating Elisp
+
+Throughout this skill you need to evaluate elisp in the running Emacs instance. Use whichever method is available, in order of preference:
+
+1. **Emacs MCP** — an `emacs_eval_elisp` tool (exact name depends on MCP server configuration)
+2. **Emacs skill** — a skill like `describe` that evaluates elisp
+3. **emacsclient** — `emacsclient --eval '(elisp-form)'` via Bash
+
+Code blocks below show the elisp to evaluate. Wrap them with whichever method you have.
+
 ## When to Use
 
 - You are about to break work into steps or create a task list
@@ -23,10 +33,9 @@ Break the work into discrete steps. Identify dependencies between them — which
 
 ## Step 2: Start the Task Graph
 
-Call via Emacs MCP. Each task is a plist with `:id`, `:name`, `:agent` (your buffer name), and optionally `:depends-on` (list of task IDs that must complete first):
+Each task is a plist with `:id`, `:name`, `:agent` (your buffer name), and optionally `:depends-on` (list of task IDs that must complete first):
 
-```
-mcp__emacs__claude-code-ide-extras-emacs_eval_elisp:
+```elisp
 (agent-shell-dispatch-start
  (buffer-name)
  '((:id "step-1" :name "Read codebase")
@@ -41,28 +50,24 @@ The `:agent` field is optional for single-agent work — it defaults to the disp
 ## Step 3: Report Progress
 
 As you begin each step:
-```
-mcp__emacs__claude-code-ide-extras-emacs_eval_elisp:
+```elisp
 (agent-shell-dispatch-report "step-1" "working" "brief description of current activity")
 ```
 
 When you finish a step:
-```
-mcp__emacs__claude-code-ide-extras-emacs_eval_elisp:
+```elisp
 (agent-shell-dispatch-report "step-1" "done")
 ```
 
 If a step fails:
-```
-mcp__emacs__claude-code-ide-extras-emacs_eval_elisp:
+```elisp
 (agent-shell-dispatch-report "step-2" "error" "what went wrong")
 ```
 
 ## Step 3b: Send Messages (optional)
 
 For significant milestones visible to the user:
-```
-mcp__emacs__claude-code-ide-extras-emacs_eval_elisp:
+```elisp
 (agent-shell-dispatch-msg-send
  (agent-shell-dispatch-msg-task-progress-make
   :agent-buffer (buffer-name) :timestamp (current-time)
@@ -71,8 +76,7 @@ mcp__emacs__claude-code-ide-extras-emacs_eval_elisp:
 ```
 
 When your overall task is done:
-```
-mcp__emacs__claude-code-ide-extras-emacs_eval_elisp:
+```elisp
 (agent-shell-dispatch-msg-send
  (agent-shell-dispatch-msg-task-completed-make
   :agent-buffer (buffer-name) :timestamp (current-time)
@@ -83,8 +87,7 @@ mcp__emacs__claude-code-ide-extras-emacs_eval_elisp:
 ## Step 4: Clean Up
 
 When all work is complete:
-```
-mcp__emacs__claude-code-ide-extras-emacs_eval_elisp:
+```elisp
 (agent-shell-dispatch-stop)
 ```
 

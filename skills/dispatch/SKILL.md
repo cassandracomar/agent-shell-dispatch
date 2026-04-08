@@ -5,11 +5,21 @@ description: 'Execute a plan with parallel agents. You become the dispatcher: sp
 
 # Dispatch Plan Execution
 
-You (the primary agent) become the dispatcher. Use the Emacs MCP to call agent-shell-dispatch elisp functions for spawning agents, sending messages, and checking status. The dispatch renderer runs as `agent-shell-dispatch-render-mode` — a minor mode that shows " Dispatch" in the mode line and can be toggled by the user.
+You (the primary agent) become the dispatcher. Use elisp evaluation to call agent-shell-dispatch functions for spawning agents, sending messages, and checking status. The dispatch renderer runs as `agent-shell-dispatch-render-mode` — a minor mode that shows " Dispatch" in the mode line and can be toggled by the user.
+
+## Evaluating Elisp
+
+Throughout this skill you need to evaluate elisp in the running Emacs instance. Use whichever method is available, in order of preference:
+
+1. **Emacs MCP** — an `emacs_eval_elisp` tool (exact name depends on MCP server configuration)
+2. **Emacs skill** — a skill like `describe` that evaluates elisp
+3. **emacsclient** — `emacsclient --eval '(elisp-form)'` via Bash
+
+Code blocks below show the elisp to evaluate. Wrap them with whichever method you have.
 
 ## When to Use
 
-- User has a plan (from hex:writing-plans or discussed in conversation)
+- User has a plan (or discussed in conversation)
 - Work can be split across 2-3 independent implementation agents
 - User wants parallel execution with review
 
@@ -26,15 +36,13 @@ You (the primary agent) become the dispatcher. Use the Emacs MCP to call agent-s
 
 First, register your buffer as the dispatcher so permission requests render here:
 
-```
-mcp__emacs__claude-code-ide-extras-emacs_eval_elisp:
+```elisp
 (setq agent-shell-dispatch--primary-buffer (buffer-name))
 ```
 
 Then spawn agents. They run in the background (no popup, no prompts, acceptEdits mode). Non-edit permissions (bash, etc.) render as button dialogs in YOUR buffer — the user handles them directly. You do NOT handle permissions.
 
-```
-mcp__emacs__claude-code-ide-extras-emacs_eval_elisp:
+```elisp
 (agent-shell-dispatch-spawn-agent
  default-directory
  "Impl-1"
@@ -43,8 +51,7 @@ mcp__emacs__claude-code-ide-extras-emacs_eval_elisp:
 
 Repeat for each agent. Then verify:
 
-```
-mcp__emacs__claude-code-ide-extras-emacs_eval_elisp:
+```elisp
 (agent-shell-dispatch-list-agents)
 ```
 
@@ -52,69 +59,18 @@ Note exact buffer names.
 
 ## Step 3: Assign Tasks and Start Task Graph
 
-Send each agent its task. Include the task ID and status reporting instructions so agents can report progress directly to elisp.
+Send each agent its task using the subagent template. Read `SUBAGENT_TEMPLATE.md` (in the same directory as this skill) and customize it per task — replace TASK_NAME, TASK_ID, TASK_DESCRIPTION, and CRITERIA with the actual values. Then send via:
 
-```
-mcp__emacs__claude-code-ide-extras-emacs_eval_elisp:
+```elisp
 (agent-shell-dispatch-send-to-agent
  "EXACT-BUFFER-NAME"
- "## Your Task: TASK_NAME (id: TASK_ID)
-
-TASK_DESCRIPTION
-
-## Instructions
-- Work in the project directory
-- Report progress via Emacs MCP eval_elisp:
-  (agent-shell-dispatch-report \"TASK_ID\" \"working\" \"description of what you're doing\")
-- When finished:
-  (agent-shell-dispatch-report \"TASK_ID\" \"done\")
-- If you hit an error:
-  (agent-shell-dispatch-report \"TASK_ID\" \"error\" \"what went wrong\")
-
-## Messaging (to dispatcher buffer)
-Report significant milestones (phase completions, not individual steps):
-  (agent-shell-dispatch-msg-send
-   (agent-shell-dispatch-msg-batch-progress-make
-    :agent-buffer (buffer-name) :timestamp (current-time)
-    :phase \"Phase 1: Unit tests\" :completed 1 :total 3)
-   agent-shell-dispatch--primary-buffer)
-
-Report batch completion:
-  (agent-shell-dispatch-msg-send
-   (agent-shell-dispatch-msg-batch-completed-make
-    :agent-buffer (buffer-name) :timestamp (current-time)
-    :summary \"All 3 phases complete, 47 tests passing\")
-   agent-shell-dispatch--primary-buffer)
-
-Report errors:
-  (agent-shell-dispatch-msg-send
-   (agent-shell-dispatch-msg-error-make
-    :agent-buffer (buffer-name) :timestamp (current-time)
-    :description \"Build failed\" :context \"Missing dependency X\")
-   agent-shell-dispatch--primary-buffer)
-
-Ask the dispatcher a question (queues automatically):
-  (agent-shell-dispatch-msg-send
-   (agent-shell-dispatch-msg-input-needed-make
-    :agent-buffer (buffer-name) :timestamp (current-time)
-    :question \"Should I split this into two PRs?\"
-    :context \"Changes touch both frontend and backend\")
-   agent-shell-dispatch--primary-buffer)
-
-- If you're unsure about a design decision, implementation approach, or
-  requirement — ASK. Send an input-needed message with enough context
-  for the dispatcher to answer: what task you're working on, what you've
-  tried, what the options are, and what you need decided.
-
-## Acceptance Criteria
-CRITERIA"
+ "CUSTOMIZED-TEMPLATE-CONTENT"
  "dispatcher")
 ```
 
 After sending ALL tasks, start the task graph renderer. It enables `agent-shell-dispatch-render-mode` in the dispatcher buffer, rendering a live SVG dependency graph in the header. Pass a list of task plists:
 
-```
-mcp__emacs__claude-code-ide-extras-emacs_eval_elisp:
+```elisp
 (agent-shell-dispatch-start
  (buffer-name)
  '((:id "impl-1" :name "Task 1 description" :agent "Claude Agent @ doom-config<N>")
@@ -141,8 +97,7 @@ View (v) button that opens an ediff session. The user handles permissions
 directly — you do NOT accept or reject on their behalf.
 
 ### If user says "stop":
-```
-mcp__emacs__claude-code-ide-extras-emacs_eval_elisp:
+```elisp
 (progn
   (agent-shell-dispatch-stop)
   (agent-shell-dispatch-kill-agents))
@@ -150,8 +105,7 @@ mcp__emacs__claude-code-ide-extras-emacs_eval_elisp:
 
 ### If user says an agent needs help:
 View that agent's output and send it guidance:
-```
-mcp__emacs__claude-code-ide-extras-emacs_eval_elisp:
+```elisp
 (agent-shell-dispatch-view-agent "BUFFER-NAME" 200)
 ```
 
@@ -160,22 +114,19 @@ mcp__emacs__claude-code-ide-extras-emacs_eval_elisp:
 When the user tells you all tasks are complete:
 
 1. **Stop progress polling**:
-```
-mcp__emacs__claude-code-ide-extras-emacs_eval_elisp:
+```elisp
 (agent-shell-dispatch-stop)
 ```
 
 2. **Gather results**:
-```
-mcp__emacs__claude-code-ide-extras-emacs_eval_elisp:
+```elisp
 (agent-shell-dispatch-view-all-agents 3000)
 ```
 
 3. **Report**: completed tasks, commits, issues, next steps.
 
 4. **Clean up agents**:
-```
-mcp__emacs__claude-code-ide-extras-emacs_eval_elisp:
+```elisp
 (agent-shell-dispatch-kill-agents)
 ```
 
@@ -198,7 +149,7 @@ mcp__emacs__claude-code-ide-extras-emacs_eval_elisp:
 ## Rules
 
 - You ARE the dispatcher. Don't start a separate session.
-- ALL agent management via MCP elisp calls.
+- ALL agent management via elisp evaluation in Emacs.
 - Use `agent-shell-dispatch-list-agents` to discover buffer names.
 - Assign ONE task per agent at a time.
 - Permissions are shown directly to the user — do NOT accept or reject on their behalf.
