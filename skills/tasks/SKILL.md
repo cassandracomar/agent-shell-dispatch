@@ -49,12 +49,14 @@ The `:agent` field is optional for single-agent work — it defaults to the disp
 
 ## Step 3: Report Progress
 
-As you begin each step:
+**Tasks stay as "not started" until you explicitly report them.** You MUST report "working" when you begin a step — this is what makes the task show as in-progress in the graph.
+
+When you START a step:
 ```elisp
 (agent-shell-dispatch-report "step-1" "working" "brief description of current activity")
 ```
 
-When you finish a step:
+When you FINISH a step:
 ```elisp
 (agent-shell-dispatch-report "step-1" "done")
 ```

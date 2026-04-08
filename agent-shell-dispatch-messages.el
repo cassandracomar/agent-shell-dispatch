@@ -277,6 +277,9 @@ Errors stay visible, not collapsed."
 (defvar agent-shell-dispatch-msg--pending-permission-agents nil
   "List of agent buffer names with unresolved permission dialogs.")
 
+(defvar agent-shell-dispatch-msg--pending-input-agents nil
+  "List of agent buffer names waiting for dispatcher input.")
+
 (defun agent-shell-dispatch-msg--cleanup-permission
     (perm-id target-buf agent-buf option-id)
   "Remove the permission dialog identified by PERM-ID from TARGET-BUF.
@@ -453,17 +456,20 @@ Permission render returns text with embedded keymap that must be preserved."
 
 (cl-defmethod agent-shell-dispatch-msg-handle
   ((msg agent-shell-dispatch-msg-input-needed) target-buf)
-  "Queue MSG question to the dispatcher agent in TARGET-BUF."
-  (when-let* ((buf (get-buffer target-buf)))
-    (with-current-buffer buf
-      (let ((agent (agent-shell-dispatch-msg-agent-buffer msg))
-            (question (agent-shell-dispatch-msg-input-needed-question msg))
-            (context (agent-shell-dispatch-msg-input-needed-context msg)))
-        (agent-shell--enqueue-request
-         :prompt (format "[Input Needed: %s]\n\n%s%s\n\nRespond via (agent-shell-dispatch-send-to-agent \"%s\" YOUR_ANSWER \"dispatcher\")"
-                         agent question
-                         (if context (format "\n\nContext: %s" context) "")
-                         agent))))))
+  "Queue MSG question to the dispatcher agent in TARGET-BUF.
+Also tracks the agent as waiting for input."
+  (let ((agent (agent-shell-dispatch-msg-agent-buffer msg)))
+    (cl-pushnew agent agent-shell-dispatch-msg--pending-input-agents
+                :test #'equal)
+    (when-let* ((buf (get-buffer target-buf)))
+      (with-current-buffer buf
+        (let ((question (agent-shell-dispatch-msg-input-needed-question msg))
+              (context (agent-shell-dispatch-msg-input-needed-context msg)))
+          (agent-shell--enqueue-request
+           :prompt (format "[Input Needed: %s]\n\n%s%s\n\nRespond via (agent-shell-dispatch-send-to-agent \"%s\" YOUR_ANSWER \"dispatcher\")"
+                           agent question
+                           (if context (format "\n\nContext: %s" context) "")
+                           agent)))))))
 
 (provide 'agent-shell-dispatch-messages)
 ;;; agent-shell-dispatch-messages.el ends here

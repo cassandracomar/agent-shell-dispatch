@@ -49,7 +49,7 @@ ALPHA=1.0 returns COLOR1, ALPHA=0.0 returns COLOR2."
                (:constructor agent-shell-dispatch-render-task-status-make)
                (:copier nil))
   "Dynamic per-frame status for one task."
-  status elapsed detail)
+  status detail)
 
 (cl-defstruct (agent-shell-dispatch-render-stack-info
                (:constructor agent-shell-dispatch-render-stack-info-make)
@@ -207,6 +207,10 @@ Respects face remapping (e.g. `solaire-mode') in the dispatcher buffer."
                                 :bg (agent-shell-dispatch-render--blend-colors dim bg 0.1)  :fg dim :icon "◦"))
              (cons 'error      (agent-shell-dispatch-render-status-style-make
                                 :bg (agent-shell-dispatch-render--blend-colors err bg tint) :fg err :icon "✗"))
+             (cons 'not-started (agent-shell-dispatch-render-status-style-make
+                                :bg (agent-shell-dispatch-render--blend-colors dim bg 0.3)
+                                :fg (agent-shell-dispatch-render--blend-colors fg dim 0.5)
+                                :icon "·"))
              (cons 'dead       (agent-shell-dispatch-render-status-style-make
                                 :bg (agent-shell-dispatch-render--blend-colors dim bg 0.05) :fg dim :icon "?")))))))
 
@@ -235,20 +239,11 @@ Returns tasks-info with :level added to each entry."
 
 (defun agent-shell-dispatch-render--transitive-reduce (tasks-info)
   "Compute edges for TASKS-INFO.
-Returns list of (from-id . to-id) pairs, including start/end connections."
-  (let ((depended-on (make-hash-table :test 'equal))
-        (edges nil))
+Returns list of (from-id . to-id) pairs for dependency connections."
+  (let (edges)
     (dolist (task tasks-info)
       (dolist (d (plist-get task :depends-on))
-        (puthash d t depended-on)))
-    (dolist (task tasks-info)
-      (let ((id (plist-get task :id))
-            (deps (plist-get task :depends-on)))
-        (if deps
-            (dolist (d deps) (push (cons d id) edges))
-          (push (cons "start" id) edges))
-        (unless (gethash id depended-on)
-          (push (cons id "end") edges))))
+        (push (cons d (plist-get task :id)) edges)))
     edges))
 
 (defun agent-shell-dispatch-render--group-by-level (tasks)
@@ -354,9 +349,7 @@ When STACK-MAP is non-nil, paired levels share width."
 COL-WIDTHS provides per-level widths.
 When STACK-MAP is non-nil, paired levels share x-position."
   (let ((positions (make-hash-table))
-        (x (+ (plist-get agent-shell-dispatch-render--layout :margin)
-              (plist-get agent-shell-dispatch-render--layout :pill-w)
-              (plist-get agent-shell-dispatch-render--layout :col-gap))))
+        (x (plist-get agent-shell-dispatch-render--layout :margin)))
     (cl-loop for lv from 0 to max-level
              for stack-info = (and stack-map (gethash lv stack-map))
              do (if (and stack-info (eq (agent-shell-dispatch-render-stack-info-position stack-info) 'bottom))
@@ -571,9 +564,9 @@ When STACK-MAP is non-nil, also avoids stacked pair bounds at the destination."
 
 (defun agent-shell-dispatch-render--svg-dimensions (svg-str)
   "Extract dimensions from SVG-STR, or nil."
-  (when (string-match "width=\"\\([0-9]+\\)\"" svg-str)
+  (when (string-match "width=\"\\([0-9.]+\\)\"" svg-str)
     (let ((w (string-to-number (match-string 1 svg-str))))
-      (when (string-match "height=\"\\([0-9]+\\)\"" svg-str)
+      (when (string-match "height=\"\\([0-9.]+\\)\"" svg-str)
         (agent-shell-dispatch-render-dimensions-make :w w :h (string-to-number (match-string 1 svg-str)))))))
 
 (defun agent-shell-dispatch-render--strip-svg-wrapper (svg-str)
@@ -627,8 +620,6 @@ Returns a `agent-shell-dispatch-render-ctx' for `agent-shell-dispatch-render-dra
          (node-pad (plist-get L :node-pad))
          (col-gap (plist-get L :col-gap))
          (margin (plist-get L :margin))
-         (pill-w (plist-get L :pill-w))
-         (pill-h (plist-get L :pill-h))
          ;; Convert task structs to internal plists for topology functions
          (tasks-info (mapcar (lambda (td)
                                (list :id (agent-shell-dispatch-render-task-id td)
@@ -660,33 +651,17 @@ Returns a `agent-shell-dispatch-render-ctx' for `agent-shell-dispatch-render-dra
                 :last-col-right last-col-right))
          ;; Canvas dimensions
          (has-bypass (let ((id-lv (make-hash-table :test 'equal)))
-                       (puthash "start" -1 id-lv)
-                       (puthash "end" (1+ max-level) id-lv)
                        (dolist (t_ leveled) (puthash (plist-get t_ :id) (plist-get t_ :level) id-lv))
                        (cl-loop for (from . to) in edges
                                 thereis (> (- (gethash to id-lv) (gethash from id-lv)) 1))))
          (bypass-pad (if has-bypass (+ node-pad 6 5) 0))
-         (w (+ last-col-right col-gap pill-w margin))
+         (w (+ last-col-right margin))
          (h (max (+ (* 2 (+ margin bypass-pad)) max-col-h) 60))
          (canvas (agent-shell-dispatch-render-dimensions-make :w w :h h))
          ;; Pre-compute node positions and edges
          (node-positions (make-hash-table :test 'equal))
          (node-edges-map (make-hash-table :test 'equal))
          (stack-arrows nil))
-
-    ;; Start pill position
-    (let* ((pill-x margin)
-           (pill-cy (/ h 2))
-           (rx (plist-get L :pill-rx)))
-      (puthash "start" (agent-shell-dispatch-render-node-pos-make
-                        :x pill-x :y (- pill-cy (/ pill-h 2))
-                        :w pill-w :h pill-h)
-               node-positions)
-      (puthash "start" (agent-shell-dispatch-render-node-edges-make
-                        :left-x (+ pill-x rx)
-                        :right-x (- (+ pill-x pill-w) rx)
-                        :cy pill-cy)
-               node-edges-map))
 
     ;; Task node positions by column
     (cl-loop
@@ -746,20 +721,6 @@ Returns a `agent-shell-dispatch-render-ctx' for `agent-shell-dispatch-render-dra
                         node-edges-map)
                (cl-incf cur-y (+ th node-pad)))))))
 
-    ;; End pill position
-    (let* ((pill-x (+ last-col-right col-gap))
-           (pill-cy (/ h 2))
-           (rx (plist-get L :pill-rx)))
-      (puthash "end" (agent-shell-dispatch-render-node-pos-make
-                      :x pill-x :y (- pill-cy (/ pill-h 2))
-                      :w pill-w :h pill-h)
-               node-positions)
-      (puthash "end" (agent-shell-dispatch-render-node-edges-make
-                      :left-x (+ pill-x rx)
-                      :right-x (- (+ pill-x pill-w) rx)
-                      :cy pill-cy)
-               node-edges-map))
-
     ;; Pre-compute col-bounds and arrow specs
     (let* ((col-bounds (agent-shell-dispatch-render--compute-col-bounds
                         node-edges-map leveled task-heights (plist-get L :node-h) stack-map))
@@ -772,8 +733,6 @@ Returns a `agent-shell-dispatch-render-ctx' for `agent-shell-dispatch-render-dra
                                 (puthash (plist-get task :id) si m)))
                             m)))
            (arrow-specs nil))
-      (puthash "start" -1 id-to-level)
-      (puthash "end" (1+ max-level) id-to-level)
       (dolist (task leveled) (puthash (plist-get task :id) (plist-get task :level) id-to-level))
       (dolist (edge edges)
         (unless (and id-to-stack
@@ -827,17 +786,6 @@ STATUS-MAP is a hash of task-id -> agent-shell-dispatch-render-task-status."
                    :fill (agent-shell-dispatch-render-theme-bg theme)
                    :rx (plist-get L :bg-rx))
 
-    ;; Start pill
-    (let ((pos (gethash "start" node-positions)))
-      (agent-shell-dispatch-render--draw-pill
-       svg
-       (agent-shell-dispatch-render-node-pos-x pos)
-       (+ (agent-shell-dispatch-render-node-pos-y pos)
-          (/ (agent-shell-dispatch-render-node-pos-h pos) 2))
-       (agent-shell-dispatch-render-node-pos-w pos)
-       (agent-shell-dispatch-render-node-pos-h pos)
-       "▶" theme))
-
     ;; Task nodes — inject current status into task plists for draw-task-node
     (dolist (task leveled)
       (let* ((id (plist-get task :id))
@@ -846,7 +794,7 @@ STATUS-MAP is a hash of task-id -> agent-shell-dispatch-render-task-status."
              (task-with-status (list :id id
                                      :name (plist-get task :name)
                                      :status (if ts (agent-shell-dispatch-render-task-status-status ts)
-                                               'waiting))))
+                                               'not-started))))
         (agent-shell-dispatch-render--draw-task-node
          svg
          (agent-shell-dispatch-render-node-pos-x pos)
@@ -854,17 +802,6 @@ STATUS-MAP is a hash of task-id -> agent-shell-dispatch-render-task-status."
          (agent-shell-dispatch-render-node-pos-w pos)
          (agent-shell-dispatch-render-node-pos-h pos)
          task-with-status theme)))
-
-    ;; End pill
-    (let ((pos (gethash "end" node-positions)))
-      (agent-shell-dispatch-render--draw-pill
-       svg
-       (agent-shell-dispatch-render-node-pos-x pos)
-       (+ (agent-shell-dispatch-render-node-pos-y pos)
-          (/ (agent-shell-dispatch-render-node-pos-h pos) 2))
-       (agent-shell-dispatch-render-node-pos-w pos)
-       (agent-shell-dispatch-render-node-pos-h pos)
-       "■" theme))
 
     ;; Arrows from pre-computed specs
     (let ((arrow-color (agent-shell-dispatch-render-theme-arrow theme)))

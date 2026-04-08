@@ -12,7 +12,7 @@ You need to evaluate elisp in the running Emacs instance for status reporting an
 
 ## Instructions
 - Work in the project directory
-- Report progress:
+- **You MUST report "working" when you start** — your task stays as "not started" in the graph until you do:
   (agent-shell-dispatch-report "TASK_ID" "working" "description of what you're doing")
 - When finished:
   (agent-shell-dispatch-report "TASK_ID" "done")

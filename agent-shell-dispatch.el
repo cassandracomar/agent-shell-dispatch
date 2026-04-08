@@ -26,13 +26,13 @@
                (:constructor agent-shell-dispatch-reported-status-make)
                (:copier nil))
   "Raw status report from an agent via MCP."
-  status detail updated started)
+  status detail updated)
 
 (cl-defstruct (agent-shell-dispatch-resolved-status
                (:constructor agent-shell-dispatch-resolved-status-make)
                (:copier nil))
   "Computed effective status after inspecting agent buffer state."
-  effective elapsed detail started)
+  effective detail)
 
 ;; -- Permission forwarding from background agents to dispatcher buffer --
 
@@ -61,13 +61,6 @@
   "Clear dispatch state. Used as teardown hook."
   (setq agent-shell-dispatch--state nil))
 
-(defun agent-shell-dispatch--format-elapsed (start-time)
-  "Format elapsed time since START-TIME as a human-readable string."
-  (let ((elapsed (floor (float-time (time-subtract nil start-time)))))
-    (cond
-     ((< elapsed 60) (format "%ds" elapsed))
-     ((< elapsed 3600) (format "%dm%02ds" (/ elapsed 60) (% elapsed 60)))
-     (t (format "%dh%02dm" (/ elapsed 3600) (% (/ elapsed 60) 60))))))
 
 (defun agent-shell-dispatch-report (task-id status &optional detail)
   "Report STATUS for TASK-ID. Called by agents via MCP.
@@ -75,52 +68,37 @@ STATUS is a string: \"working\", \"done\", \"error\".
 DETAIL is an optional description of current activity."
   (when-let* ((state agent-shell-dispatch--state)
               (statuses (agent-shell-dispatch-state-statuses state)))
-    (let ((existing (gethash task-id statuses)))
-      (puthash task-id
-               (agent-shell-dispatch-reported-status-make
-                :status (intern status)
-                :detail detail
-                :updated (current-time)
-                :started (or (and existing (agent-shell-dispatch-reported-status-started existing))
-                             (current-time)))
-               statuses))))
+    (puthash task-id
+             (agent-shell-dispatch-reported-status-make
+              :status (intern status)
+              :detail detail
+              :updated (current-time))
+             statuses)))
 
 
 
 (defun agent-shell-dispatch--resolve-status (task statuses)
   "Determine effective status for TASK given STATUSES hash.
-Returns a agent-shell-dispatch-resolved-status struct."
+Returns a agent-shell-dispatch-resolved-status struct.
+Status is driven by explicit reports via `agent-shell-dispatch-report'.
+Tasks without a report are `not-started'."
   (let* ((id (plist-get task :id))
          (agent-buf (plist-get task :agent))
          (buf (get-buffer agent-buf))
          (alive (and buf (get-buffer-process buf)))
          (busy (and buf (buffer-local-value 'shell-maker--busy buf)))
-         (perm (member agent-buf agent-shell-dispatch-msg--pending-permission-agents))
          (reported (gethash id statuses))
          (rep-status (and reported (agent-shell-dispatch-reported-status-status reported)))
          (rep-detail (and reported (agent-shell-dispatch-reported-status-detail reported)))
-         (started (and reported (agent-shell-dispatch-reported-status-started reported)))
          (effective (cond
                      ((eq rep-status 'done) 'done)
                      ((eq rep-status 'error) 'error)
-                     (perm 'permission)
-                     ((and alive busy) 'working)
-                     ((eq rep-status 'working) 'working)
-                     ((and alive (not busy) started) 'done)
-                     (alive 'waiting)
-                     (t 'dead))))
-    ;; Record start time on first working state
-    (when (and (eq effective 'working) (not started))
-      (puthash id (agent-shell-dispatch-reported-status-make
-                   :status 'working :detail rep-detail
-                   :updated (current-time) :started (current-time))
-               statuses)
-      (setq started (current-time)))
+                     ((eq rep-status 'working)
+                      (if (not alive) 'dead 'working))
+                     (t 'not-started))))
     (agent-shell-dispatch-resolved-status-make
      :effective effective
-     :elapsed (if started (agent-shell-dispatch--format-elapsed started) nil)
-     :detail (and rep-detail (memq effective '(working permission)) rep-detail)
-     :started started)))
+     :detail (and rep-detail (memq effective '(working permission)) rep-detail))))
 
 
 (defun agent-shell-dispatch--build-status-map ()
@@ -135,9 +113,27 @@ Returns a hash of id → `agent-shell-dispatch-render-task-status', or nil."
                (id (plist-get task :id)))
           (puthash id (agent-shell-dispatch-render-task-status-make
                        :status (agent-shell-dispatch-resolved-status-effective resolved)
-                       :elapsed (agent-shell-dispatch-resolved-status-elapsed resolved)
                        :detail (agent-shell-dispatch-resolved-status-detail resolved))
                    sm)))
+      ;; Post-pass: for each blocked agent buffer, mark only the active
+      ;; (most recently reported working) task as 'permission'.
+      (let ((blocked-bufs (seq-uniq
+                           (append agent-shell-dispatch-msg--pending-permission-agents
+                                   agent-shell-dispatch-msg--pending-input-agents))))
+        (dolist (agent-buf blocked-bufs)
+          (let (active-id active-time)
+            (dolist (task tasks)
+              (when (equal (plist-get task :agent) agent-buf)
+                (let* ((id (plist-get task :id))
+                       (reported (gethash id statuses))
+                       (rep-status (and reported (agent-shell-dispatch-reported-status-status reported)))
+                       (updated (and reported (agent-shell-dispatch-reported-status-updated reported))))
+                  (when (and (eq rep-status 'working)
+                             (or (null active-time) (time-less-p active-time updated)))
+                    (setq active-id id active-time updated)))))
+            (when active-id
+              (let ((ts (gethash active-id sm)))
+                (setf (agent-shell-dispatch-render-task-status-status ts) 'permission))))))
       sm)))
 
 (defun agent-shell-dispatch-start (dispatcher-buffer tasks &optional _interval)
@@ -145,7 +141,8 @@ Returns a hash of id → `agent-shell-dispatch-render-task-status', or nil."
 DISPATCHER-BUFFER is the dispatcher's `agent-shell' buffer name.
 TASKS is a list of plists: ((:id ID :name NAME :agent AGENT-BUF) ...)."
   (agent-shell-dispatch-render-teardown)
-  (setq agent-shell-dispatch-msg--pending-permission-agents nil)
+  (setq agent-shell-dispatch-msg--pending-permission-agents nil
+        agent-shell-dispatch-msg--pending-input-agents nil)
   ;; Normalize :agent — default to dispatcher buffer if missing or not a string
   (let* ((normalized (mapcar (lambda (task)
                                (let ((agent (plist-get task :agent)))
@@ -285,8 +282,11 @@ Returns list of plists with :buffer and :status."
 (defun agent-shell-dispatch-send-to-agent (buffer-name message &optional from)
   "Send MESSAGE to the agent session in BUFFER-NAME.
 FROM identifies the sender. Queues if agent is busy.
+Clears any pending input-needed state for BUFFER-NAME.
 Returns t on success, nil if buffer not found."
   (when-let* ((buf (get-buffer buffer-name)))
+    (setq agent-shell-dispatch-msg--pending-input-agents
+          (delete buffer-name agent-shell-dispatch-msg--pending-input-agents))
     (with-current-buffer buf
       (let ((prompt (if from
                         (format "[From: %s]\n\n%s" from message)

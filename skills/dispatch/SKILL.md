@@ -77,7 +77,7 @@ After sending ALL tasks, start the task graph renderer. It enables `agent-shell-
    (:id "impl-2" :name "Task 2 description" :agent "Claude Agent @ doom-config<M>")))
 ```
 
-The header graph updates at ~100ms with spinners, elapsed times, and agent-reported details. Geometry is cached; only status colors redraw per frame. You do NOT need to poll or check statuses.
+The header graph updates at ~100ms with spinners and status colors. Geometry is cached; only status colors redraw per frame. You do NOT need to poll or check statuses.
 
 ## Step 4: Wait for User
 

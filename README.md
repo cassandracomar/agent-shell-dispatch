@@ -5,10 +5,13 @@ Multi-agent dispatch and coordination for [agent-shell](https://github.com/nicho
 ## Features
 
 - **Parallel agent spawning** -- launch background agent-shell sessions that work independently
-- **Live SVG task graph** -- dependency-aware DAG rendered in the header line, with status colors, spinners, and elapsed times
+- **Live SVG task graph** -- dependency-aware DAG rendered in the header line, with status colors, state indicators, and
+  a progress spinner.
 - **Permission forwarding** -- tool permission requests from background agents surface as interactive button dialogs in the dispatcher buffer (with ediff support for file diffs)
 - **Inter-agent messaging** -- typed message protocol for progress reports, error reports, input requests, and batch milestones
 - **Dispatcher pattern** -- the primary agent coordinates without implementing, delegating work to sub-agents
+
+![example-header](./docs/example-header.png)
 
 ## Installation
 
