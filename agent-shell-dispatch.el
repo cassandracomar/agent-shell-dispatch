@@ -36,11 +36,11 @@
 
 ;; -- Permission forwarding from background agents to dispatcher buffer --
 
-(defvar agent-shell-dispatch--primary-buffer nil
+(defvar-local agent-shell-dispatch--primary-buffer nil
   "Buffer name of the primary (dispatcher) shell for permission rendering.")
 
-(defvar agent-shell-dispatch--state nil
-  "State for the dispatch progress polling timer.")
+(defvar-local agent-shell-dispatch--state nil
+  "Dispatch session state for this buffer.")
 
 (defun agent-shell-dispatch-forward-permission (permission)
   "Forward PERMISSION from a background agent via the messaging protocol."
@@ -204,7 +204,12 @@ TASKS is a list of plists: ((:id ID :name NAME :agent AGENT-BUF) ...)."
 (defun agent-shell-dispatch-stop ()
   "Stop rendering. State preserved for mode toggle."
   (when agent-shell-dispatch-render-mode
-    (agent-shell-dispatch-render-mode 'toggle)))
+    (agent-shell-dispatch-render-mode 'toggle))
+  ;; Safety net: clear ctx and reset header even if mode was already off
+  (when agent-shell-dispatch-render--ctx
+    (setq agent-shell-dispatch-render--ctx nil)
+    (when agent-shell-dispatch-render-reset-function
+      (ignore-errors (funcall agent-shell-dispatch-render-reset-function)))))
 
 ;; Backward-compat aliases for old skill API
 (defun agent-shell-dispatch-start-progress-polling (dispatcher-buffer agents &optional interval)

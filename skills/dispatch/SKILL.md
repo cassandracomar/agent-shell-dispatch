@@ -145,9 +145,11 @@ View that agent's output and send it guidance:
 
 ## Step 5: Completion
 
+**All dispatch functions must be evaluated in YOUR buffer (the dispatcher).** Dispatch state is buffer-local — calling these from a subagent buffer is a no-op.
+
 When the user tells you all tasks are complete:
 
-1. **Stop progress polling**:
+1. **Stop the task graph**:
 ```elisp
 (agent-shell-dispatch-stop)
 ```

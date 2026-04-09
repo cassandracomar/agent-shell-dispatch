@@ -872,34 +872,35 @@ DISPATCHER-BUF is the buffer name."
 ;; hook variables — the render module never references dispatch state,
 ;; agent-shell, or shell-maker directly.
 
-(defvar agent-shell-dispatch-render--ctx nil
+(defvar-local agent-shell-dispatch-render--ctx nil
   "Cached `agent-shell-dispatch-render-ctx'.")
 
-(defvar agent-shell-dispatch-render--task-defs nil
+(defvar-local agent-shell-dispatch-render--task-defs nil
   "Original `agent-shell-dispatch-render-task' list for re-prepare on theme change.")
 
-(defvar agent-shell-dispatch-render-buffer nil
+(defvar-local agent-shell-dispatch-render-buffer nil
   "Buffer name for face resolution and heartbeat context.")
 
-(defvar agent-shell-dispatch-render-status-function nil
+(defvar-local agent-shell-dispatch-render-status-function nil
   "Function of no args returning a hash of id → `agent-shell-dispatch-render-task-status'.
 Called every frame by the header renderer.")
 
-(defvar agent-shell-dispatch-render-header-function nil
+(defvar-local agent-shell-dispatch-render-header-function nil
   "Function of no args that triggers a header redisplay.
 Called by the heartbeat timer.")
 
-(defvar agent-shell-dispatch-render-reset-function nil
+(defvar-local agent-shell-dispatch-render-reset-function nil
   "Function of no args that restores the original header on mode disable.")
 
-(defvar agent-shell-dispatch-render-busy-p-function nil
+(defvar-local agent-shell-dispatch-render-busy-p-function nil
   "Function of no args returning non-nil when the host buffer is busy.
 When busy, the heartbeat skips since the host drives updates itself.")
 
 (defvar agent-shell-dispatch-render-advice-target nil
-  "Function symbol to advise with the header extend function.")
+  "Function symbol to advise with the header extend function.
+Global — only one advice installation is needed.")
 
-(defvar agent-shell-dispatch-render--heartbeat-timer nil
+(defvar-local agent-shell-dispatch-render--heartbeat-timer nil
   "Timer that drives header updates while the host buffer is idle.")
 
 (defun agent-shell-dispatch-render-set-tasks (task-defs)
@@ -907,19 +908,19 @@ When busy, the heartbeat skips since the host drives updates itself.")
   (setq agent-shell-dispatch-render--task-defs task-defs
         agent-shell-dispatch-render--ctx (agent-shell-dispatch-render-prepare task-defs)))
 
-(defun agent-shell-dispatch-render--heartbeat ()
-  "Force a header update when the host buffer is idle."
-  (when-let* (( agent-shell-dispatch-render--ctx)
-              (buf (and agent-shell-dispatch-render-buffer
-                        (get-buffer agent-shell-dispatch-render-buffer))))
+(defun agent-shell-dispatch-render--heartbeat (buf)
+  "Force a header update in BUF when the host buffer is idle."
+  (when (buffer-live-p buf)
     (with-current-buffer buf
-      (unless (and agent-shell-dispatch-render-busy-p-function
-                   (funcall agent-shell-dispatch-render-busy-p-function))
-        (when agent-shell-dispatch-render-header-function
-          (ignore-errors (funcall agent-shell-dispatch-render-header-function)))))))
+      (when agent-shell-dispatch-render--ctx
+        (unless (and agent-shell-dispatch-render-busy-p-function
+                     (funcall agent-shell-dispatch-render-busy-p-function))
+          (when agent-shell-dispatch-render-header-function
+            (ignore-errors (funcall agent-shell-dispatch-render-header-function))))))))
 
 (defun agent-shell-dispatch-render--extend-header (&rest _)
-  "Build task graph SVG and append below the host header SVG."
+  "Build task graph SVG and append below the host header SVG.
+Buffer-local render vars ensure this is a no-op in non-dispatcher buffers."
   (when-let* ((ctx agent-shell-dispatch-render--ctx)
               (status-fn agent-shell-dispatch-render-status-function)
               (status-map (funcall status-fn))
@@ -938,36 +939,63 @@ When busy, the heartbeat skips since the host drives updates itself.")
                                               :data combined :scale 'default))))))))
 
 (defun agent-shell-dispatch-render--on-theme-change (&rest _)
-  "Recompute theme and re-prepare geometry on theme change."
+  "Recompute theme and re-prepare geometry on theme change.
+Iterates over all buffers with active dispatch render state."
   (agent-shell-dispatch-render-refresh-theme)
-  (when agent-shell-dispatch-render--task-defs
-    (setq agent-shell-dispatch-render--ctx
-          (agent-shell-dispatch-render-prepare agent-shell-dispatch-render--task-defs))))
+  (dolist (buf (buffer-list))
+    (when (buffer-live-p buf)
+      (with-current-buffer buf
+        (when agent-shell-dispatch-render--task-defs
+          (setq agent-shell-dispatch-render--ctx
+                (agent-shell-dispatch-render-prepare agent-shell-dispatch-render--task-defs)))))))
+
+(define-globalized-minor-mode agent-shell-dispatch-render-global-mode
+  agent-shell-dispatch-render--global-dummy
+  agent-shell-dispatch-render--global-dummy
+  "Global minor mode for dispatch task graph rendering.
+Installs advice on the header update function and a theme change hook.
+These are no-ops in buffers without active dispatch render state.
+Enable in your config: (agent-shell-dispatch-render-global-mode 1)"
+  :group 'agent-shell
+  (if agent-shell-dispatch-render-global-mode
+      (progn
+        (when agent-shell-dispatch-render-advice-target
+          (advice-add agent-shell-dispatch-render-advice-target
+                      :after #'agent-shell-dispatch-render--extend-header))
+        (add-hook 'enable-theme-functions #'agent-shell-dispatch-render--on-theme-change))
+    (when agent-shell-dispatch-render-advice-target
+      (advice-remove agent-shell-dispatch-render-advice-target
+                     #'agent-shell-dispatch-render--extend-header))
+    (remove-hook 'enable-theme-functions #'agent-shell-dispatch-render--on-theme-change)))
+
+(defun agent-shell-dispatch-render--global-dummy (&rest _)
+  "No-op turn-on function for the globalized minor mode.")
 
 (define-minor-mode agent-shell-dispatch-render-mode
-  "Minor mode for dispatch task graph rendering in the header.
-When enabled, installs header advice, heartbeat timer, and theme hook.
-When disabled, tears them all down and restores the header."
+  "Buffer-local minor mode for dispatch task graph heartbeat.
+Manages the per-buffer heartbeat timer that drives header updates.
+Requires `agent-shell-dispatch-render-global-mode' for the advice."
   :lighter " Dispatch"
   (if agent-shell-dispatch-render-mode
       (if (null agent-shell-dispatch-render--ctx)
           (setq agent-shell-dispatch-render-mode nil)
-        (when agent-shell-dispatch-render-advice-target
-          (advice-add agent-shell-dispatch-render-advice-target
-                      :after #'agent-shell-dispatch-render--extend-header))
-        (add-hook 'enable-theme-functions #'agent-shell-dispatch-render--on-theme-change)
-        (setq agent-shell-dispatch-render--heartbeat-timer
-              (run-with-timer 0.1 0.1 #'agent-shell-dispatch-render--heartbeat)))
+        ;; Auto-enable global mode if not already on
+        (unless agent-shell-dispatch-render-global-mode
+          (agent-shell-dispatch-render-global-mode 1))
+        ;; Buffer-local heartbeat timer
+        (let ((buf (current-buffer)))
+          (setq agent-shell-dispatch-render--heartbeat-timer
+                (run-with-timer 0.1 0.1
+                                (lambda () (agent-shell-dispatch-render--heartbeat buf))))))
     (when (timerp agent-shell-dispatch-render--heartbeat-timer)
       (cancel-timer agent-shell-dispatch-render--heartbeat-timer)
       (setq agent-shell-dispatch-render--heartbeat-timer nil))
-    (when agent-shell-dispatch-render-advice-target
-      (advice-remove agent-shell-dispatch-render-advice-target #'agent-shell-dispatch-render--extend-header))
-    (remove-hook 'enable-theme-functions #'agent-shell-dispatch-render--on-theme-change)
+    ;; Clear ctx BEFORE reset so the advice doesn't re-render during header update
+    (setq agent-shell-dispatch-render--ctx nil)
     (when agent-shell-dispatch-render-reset-function
       (ignore-errors (funcall agent-shell-dispatch-render-reset-function)))))
 
-(defvar agent-shell-dispatch-render-teardown-hook nil
+(defvar-local agent-shell-dispatch-render-teardown-hook nil
   "Hook run during teardown for clearing external state.")
 
 (defun agent-shell-dispatch-render-teardown ()
