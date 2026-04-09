@@ -20,7 +20,7 @@
                (:constructor agent-shell-dispatch-state-make)
                (:copier nil))
   "Active dispatch session state."
-  dispatcher-buffer tasks statuses)
+  dispatcher-buffer tasks statuses agents)
 
 (cl-defstruct (agent-shell-dispatch-reported-status
                (:constructor agent-shell-dispatch-reported-status-make)
@@ -87,19 +87,13 @@ Subagent buffers have nil state, so no recursion."
       (when-let* ((buf (get-buffer shell-buf)))
         (with-current-buffer buf
           (when-let* ((state agent-shell-dispatch--state)
-                      (tasks (agent-shell-dispatch-state-tasks state)))
-            (let ((self (buffer-name))
-                  (seen (make-hash-table :test 'equal)))
-              (dolist (task tasks)
-                (let ((agent-buf (plist-get task :agent)))
-                  (when (and agent-buf
-                             (not (equal agent-buf self))
-                             (not (gethash agent-buf seen))
-                             (get-buffer agent-buf))
-                    (puthash agent-buf t seen)
-                    (agent-shell--set-default-session-mode
-                     :shell-buffer agent-buf
-                     :mode-id mode-id)))))))))))
+                      (agents (agent-shell-dispatch-state-agents state)))
+            (maphash (lambda (agent-buf _)
+                       (when (get-buffer agent-buf)
+                         (agent-shell--set-default-session-mode
+                          :shell-buffer agent-buf
+                          :mode-id mode-id)))
+                     agents)))))))
 
 ;; -- Dispatch task graph and progress rendering --
 
@@ -205,7 +199,8 @@ TASKS is a list of plists: ((:id ID :name NAME :agent AGENT-BUF) ...)."
           (agent-shell-dispatch-state-make
            :dispatcher-buffer dispatcher-buffer
            :tasks normalized
-           :statuses (make-hash-table :test 'equal)))
+           :statuses (make-hash-table :test 'equal)
+           :agents (make-hash-table :test 'equal)))
     ;; Auto-enable global mode if not already on
     (unless agent-shell-dispatch-global-mode
       (agent-shell-dispatch-global-mode 1))
@@ -252,22 +247,23 @@ DISPATCHER-BUFFER and INTERVAL are forwarded to `agent-shell-dispatch-start'."
 
 (defun agent-shell-dispatch-kill-agents ()
   "Kill all dispatched agent buffers.
-Also stops dispatch polling. Returns the number of agents killed."
-  (let ((tasks (and agent-shell-dispatch--state (agent-shell-dispatch-state-tasks agent-shell-dispatch--state)))
-        (self (buffer-name)))
+Also stops dispatch rendering. Returns the number of agents killed."
+  (let ((agents (and agent-shell-dispatch--state
+                     (agent-shell-dispatch-state-agents agent-shell-dispatch--state))))
     (agent-shell-dispatch-stop)
     (let ((kill-buffer-query-functions nil)
-          (confirm-kill-processes nil))
-      (cl-loop for task in tasks
-               for buf-name = (plist-get task :agent)
-               unless (or (null buf-name) (equal buf-name self))
-               do (when-let* ((buf (get-buffer buf-name))
-                              (proc (get-buffer-process buf)))
-                    (set-process-query-on-exit-flag proc nil)
-                    (delete-process proc))
-               (when-let* ((buf (get-buffer buf-name)))
-                 (kill-buffer buf))
-               and count t))))
+          (confirm-kill-processes nil)
+          (count 0))
+      (when agents
+        (maphash (lambda (buf-name _)
+                   (when-let* ((buf (get-buffer buf-name)))
+                     (when-let* ((proc (get-buffer-process buf)))
+                       (set-process-query-on-exit-flag proc nil)
+                       (delete-process proc))
+                     (kill-buffer buf)
+                     (cl-incf count)))
+                 agents))
+      count)))
 
 ;; -- Start function for spawned agents --
 
@@ -317,7 +313,12 @@ Returns the buffer name."
                          (agent-shell--enqueue-request :prompt msg)
                          (agent-shell--process-pending-request))))
                    buf initial-message))
-    (when (buffer-live-p buf) (buffer-name buf))))
+    (when (buffer-live-p buf)
+      ;; Register in dispatcher's agent set
+      (when-let* ((state agent-shell-dispatch--state)
+                  (agents (agent-shell-dispatch-state-agents state)))
+        (puthash (buffer-name buf) t agents))
+      (buffer-name buf))))
 
 (defun agent-shell-dispatch-list-agents ()
   "List active `agent-shell' dispatch buffers.
