@@ -55,10 +55,30 @@
      target)
     t))
 
+;; -- Queue drain after response completion --
+
+(defun agent-shell-dispatch--drain-queue (&rest _)
+  "Process pending requests after a response completes.
+Safety net: if a message handler enqueued while the dispatcher was busy,
+this ensures the request is processed once the dispatcher goes idle."
+  (when (and agent-shell-dispatch--state
+             (derived-mode-p 'agent-shell-mode)
+             (not shell-maker--busy))
+    (let ((buf (current-buffer)))
+      (run-with-idle-timer
+       0.2 nil
+       (lambda ()
+         (when (buffer-live-p buf)
+           (with-current-buffer buf
+             (when (and (not shell-maker--busy)
+                        (derived-mode-p 'agent-shell-mode))
+               (agent-shell--process-pending-request)))))))))
+
 ;; -- Dispatch task graph and progress rendering --
 
 (defun agent-shell-dispatch--clear-state ()
   "Clear dispatch state. Used as teardown hook."
+  (advice-remove 'shell-maker-finish-output #'agent-shell-dispatch--drain-queue)
   (setq agent-shell-dispatch--state nil))
 
 
@@ -160,6 +180,8 @@ TASKS is a list of plists: ((:id ID :name NAME :agent AGENT-BUF) ...)."
            :dispatcher-buffer dispatcher-buffer
            :tasks normalized
            :statuses (make-hash-table :test 'equal)))
+    ;; Install queue-drain advice for message processing
+    (advice-add 'shell-maker-finish-output :after #'agent-shell-dispatch--drain-queue)
     ;; Set up render module
     (add-hook 'agent-shell-dispatch-render-teardown-hook
               #'agent-shell-dispatch--clear-state)

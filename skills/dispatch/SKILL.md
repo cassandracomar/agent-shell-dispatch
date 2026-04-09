@@ -68,6 +68,11 @@ Send each agent its task using the subagent template. Read `SUBAGENT_TEMPLATE.md
  "dispatcher")
 ```
 
+**After sending each task, mark it as working** — you own all task graph updates:
+```elisp
+(agent-shell-dispatch-report "TASK-ID" "working")
+```
+
 After sending ALL tasks, start the task graph renderer. It enables `agent-shell-dispatch-render-mode` in the dispatcher buffer, rendering a live SVG dependency graph in the header. Pass a list of task plists:
 
 ```elisp
@@ -89,6 +94,35 @@ Tell the user:
 > - You want to stop (`stop`)
 
 **Do NOT poll statuses yourself.** The elisp timer handles progress updates. Wait for the user to tell you what to do next.
+
+### Task graph updates:
+**You own all task graph updates.** Subagents do NOT call `agent-shell-dispatch-report` — they communicate via messages only. You will receive queued prompts for:
+- `[Task Complete: agent (task: ID)]` — subagent finished. If reviews are required (see review policy from Step 1), do NOT mark the task done yet — spawn or send a reviewer first. Only mark done after the review passes:
+  ```elisp
+  (agent-shell-dispatch-report "TASK-ID" "done")
+  ```
+- `[Task Error: agent (task: ID)]` — subagent hit an error. Investigate, then:
+  ```elisp
+  (agent-shell-dispatch-report "TASK-ID" "error" "reason")
+  ```
+
+### Review flow:
+When the review policy requires reviews:
+1. On `[Task Complete]`, send a reviewer to check the implementer's work
+2. If the reviewer passes → mark the task done
+3. If the reviewer requests changes → send the feedback directly to the implementer via `agent-shell-dispatch-send-to-agent`. The implementer fixes and sends a new `[Task Complete]`. Re-review.
+4. Repeat until the reviewer passes
+
+**Fix-loop shortcut:** For efficiency, instruct the reviewer to send change requests directly to the implementer using `agent-shell-dispatch-send-to-agent`, and have the implementer message the reviewer back when fixed. The dispatcher only gets notified of the final pass/fail outcome — no need to relay every round-trip.
+
+**Multi-stage reviews:** If a task requires multiple review stages (e.g. correctness → style → integration), define all stages upfront in the reviewer's assignment. Each stage reports its outcome. If all stages pass in one go, a single `[Task Complete]` suffices.
+
+### Shared code changes:
+If a reviewer flags an issue in shared code (used by multiple tasks), do NOT bundle the fix with the triggering task's review. Instead:
+1. Create a separate mini-task for the shared fix
+2. Assign it to an implementer
+3. Review the shared fix independently
+4. Only then continue the original task's review
 
 ### Permissions:
 Permission requests from background agents render as button dialogs in your

@@ -12,39 +12,38 @@ You need to evaluate elisp in the running Emacs instance for status reporting an
 
 ## Instructions
 - Work in the project directory
-- **You MUST report "working" when you start** — your task stays as "not started" in the graph until you do:
-  (agent-shell-dispatch-report "TASK_ID" "working" "description of what you're doing")
-- When finished:
-  (agent-shell-dispatch-report "TASK_ID" "done")
-- If you hit an error:
-  (agent-shell-dispatch-report "TASK_ID" "error" "what went wrong")
+- **Do NOT call `agent-shell-dispatch-report` or `agent-shell-dispatch-start`** — the dispatcher manages all task graph updates. Calling these yourself will corrupt the shared dispatch state.
+- Communicate with the dispatcher via messages only (see below).
 
 ## Messaging (to dispatcher buffer)
+
+All messages are sent to the dispatcher buffer. The dispatcher manages the task graph based on your messages.
+
+When finished, send a completion message:
+  (agent-shell-dispatch-msg-send
+   (agent-shell-dispatch-msg-task-completed-make
+    :agent-buffer "EXACT-AGENT-BUFFER-NAME" :timestamp (current-time)
+    :task-id "TASK_ID" :summary "Brief summary of what was done")
+   agent-shell-dispatch--primary-buffer)
+
 Report significant milestones (phase completions, not individual steps):
   (agent-shell-dispatch-msg-send
    (agent-shell-dispatch-msg-batch-progress-make
-    :agent-buffer (buffer-name) :timestamp (current-time)
+    :agent-buffer "EXACT-AGENT-BUFFER-NAME" :timestamp (current-time)
     :phase "Phase 1: Unit tests" :completed 1 :total 3)
-   agent-shell-dispatch--primary-buffer)
-
-Report batch completion:
-  (agent-shell-dispatch-msg-send
-   (agent-shell-dispatch-msg-batch-completed-make
-    :agent-buffer (buffer-name) :timestamp (current-time)
-    :summary "All 3 phases complete, 47 tests passing")
    agent-shell-dispatch--primary-buffer)
 
 Report errors:
   (agent-shell-dispatch-msg-send
    (agent-shell-dispatch-msg-error-make
-    :agent-buffer (buffer-name) :timestamp (current-time)
-    :description "Build failed" :context "Missing dependency X")
+    :agent-buffer "EXACT-AGENT-BUFFER-NAME" :timestamp (current-time)
+    :task-id "TASK_ID" :description "Build failed" :context "Missing dependency X")
    agent-shell-dispatch--primary-buffer)
 
 Ask the dispatcher a question (queues automatically):
   (agent-shell-dispatch-msg-send
    (agent-shell-dispatch-msg-input-needed-make
-    :agent-buffer (buffer-name) :timestamp (current-time)
+    :agent-buffer "EXACT-AGENT-BUFFER-NAME" :timestamp (current-time)
     :question "Should I split this into two PRs?"
     :context "Changes touch both frontend and backend")
    agent-shell-dispatch--primary-buffer)

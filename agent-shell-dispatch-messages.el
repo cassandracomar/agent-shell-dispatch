@@ -65,14 +65,14 @@
                (:constructor agent-shell-dispatch-msg-task-completed-make)
                (:copier nil))
   "Overall task completed."
-  summary)
+  task-id summary)
 
 (cl-defstruct (agent-shell-dispatch-msg-error
                (:include agent-shell-dispatch-msg)
                (:constructor agent-shell-dispatch-msg-error-make)
                (:copier nil))
   "Error report from a subagent."
-  description context)
+  task-id description context)
 
 ;; ── Protocol ────────────────────────────────────────────────────────
 
@@ -455,6 +455,35 @@ Permission render returns text with embedded keymap that must be preserved."
 ;; ── Handle methods ──────────────────────────────────────────────────
 
 (cl-defmethod agent-shell-dispatch-msg-handle
+  ((msg agent-shell-dispatch-msg-task-completed) target-buf)
+  "Notify the dispatcher that a subagent has completed its task.
+Queues a prompt so the dispatcher can review and mark the task done."
+  (let ((agent (agent-shell-dispatch-msg-agent-buffer msg))
+        (task-id (agent-shell-dispatch-msg-task-completed-task-id msg))
+        (summary (agent-shell-dispatch-msg-task-completed-summary msg)))
+    (when-let* ((buf (get-buffer target-buf)))
+      (with-current-buffer buf
+        (agent-shell--enqueue-request
+         :prompt (format "[Task Complete: %s (task: %s)]\n\n%s" agent task-id summary))
+        (agent-shell--process-pending-request)))))
+
+(cl-defmethod agent-shell-dispatch-msg-handle
+  ((msg agent-shell-dispatch-msg-error) target-buf)
+  "Notify the dispatcher of a subagent error.
+Queues a prompt so the dispatcher can update the task graph."
+  (let ((agent (agent-shell-dispatch-msg-agent-buffer msg))
+        (task-id (agent-shell-dispatch-msg-error-task-id msg))
+        (desc (agent-shell-dispatch-msg-error-description msg))
+        (ctx (agent-shell-dispatch-msg-error-context msg)))
+    (when-let* ((buf (get-buffer target-buf)))
+      (with-current-buffer buf
+        (agent-shell--enqueue-request
+         :prompt (format "[Task Error: %s (task: %s)]\n\n%s%s"
+                         agent task-id desc
+                         (if ctx (format "\n\nContext: %s" ctx) "")))
+        (agent-shell--process-pending-request)))))
+
+(cl-defmethod agent-shell-dispatch-msg-handle
   ((msg agent-shell-dispatch-msg-input-needed) target-buf)
   "Queue MSG question to the dispatcher agent in TARGET-BUF.
 Also tracks the agent as waiting for input."
@@ -469,7 +498,8 @@ Also tracks the agent as waiting for input."
            :prompt (format "[Input Needed: %s]\n\n%s%s\n\nRespond via (agent-shell-dispatch-send-to-agent \"%s\" YOUR_ANSWER \"dispatcher\")"
                            agent question
                            (if context (format "\n\nContext: %s" context) "")
-                           agent)))))))
+                           agent))
+          (agent-shell--process-pending-request))))))
 
 (provide 'agent-shell-dispatch-messages)
 ;;; agent-shell-dispatch-messages.el ends here
