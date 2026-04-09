@@ -949,27 +949,6 @@ Iterates over all buffers with active dispatch render state."
           (setq agent-shell-dispatch-render--ctx
                 (agent-shell-dispatch-render-prepare agent-shell-dispatch-render--task-defs)))))))
 
-(define-globalized-minor-mode agent-shell-dispatch-render-global-mode
-  agent-shell-dispatch-render--global-dummy
-  agent-shell-dispatch-render--global-dummy
-  "Global minor mode for dispatch task graph rendering.
-Installs advice on the header update function and a theme change hook.
-These are no-ops in buffers without active dispatch render state.
-Enable in your config: (agent-shell-dispatch-render-global-mode 1)"
-  :group 'agent-shell
-  (if agent-shell-dispatch-render-global-mode
-      (progn
-        (when agent-shell-dispatch-render-advice-target
-          (advice-add agent-shell-dispatch-render-advice-target
-                      :after #'agent-shell-dispatch-render--extend-header))
-        (add-hook 'enable-theme-functions #'agent-shell-dispatch-render--on-theme-change))
-    (when agent-shell-dispatch-render-advice-target
-      (advice-remove agent-shell-dispatch-render-advice-target
-                     #'agent-shell-dispatch-render--extend-header))
-    (remove-hook 'enable-theme-functions #'agent-shell-dispatch-render--on-theme-change)))
-
-(defun agent-shell-dispatch-render--global-dummy (&rest _)
-  "No-op turn-on function for the globalized minor mode.")
 
 (define-minor-mode agent-shell-dispatch-render-mode
   "Buffer-local minor mode for dispatch task graph heartbeat.
@@ -980,8 +959,8 @@ Requires `agent-shell-dispatch-render-global-mode' for the advice."
       (if (null agent-shell-dispatch-render--ctx)
           (setq agent-shell-dispatch-render-mode nil)
         ;; Auto-enable global mode if not already on
-        (unless agent-shell-dispatch-render-global-mode
-          (agent-shell-dispatch-render-global-mode 1))
+        (unless (bound-and-true-p agent-shell-dispatch-global-mode)
+          (agent-shell-dispatch-global-mode 1))
         ;; Buffer-local heartbeat timer
         (let ((buf (current-buffer)))
           (setq agent-shell-dispatch-render--heartbeat-timer

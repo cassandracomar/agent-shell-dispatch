@@ -12,6 +12,7 @@ Multi-agent dispatch and coordination for [agent-shell](https://github.com/nicho
 - **Permission forwarding** -- tool permission requests from background agents surface as interactive button dialogs in the dispatcher buffer (with ediff support for file diffs)
 - **Inter-agent messaging** -- typed message protocol for progress reports, error reports, input requests, and completion notifications
 - **Dispatcher pattern** -- the primary agent coordinates without implementing; subagents communicate via messages only, and the dispatcher owns all task graph updates
+- **Session mode propagation** -- when you change the dispatcher's session mode (e.g. plan → acceptEdits), the change is automatically forwarded to all subagent sessions so their permission behavior stays in sync
 
 ## Task States
 
@@ -32,7 +33,7 @@ Multi-agent dispatch and coordination for [agent-shell](https://github.com/nicho
 (use-package agent-shell-dispatch
   :after agent-shell
   :config
-  (agent-shell-dispatch-render-global-mode 1))
+  (agent-shell-dispatch-global-mode 1))
 ```
 
 ### Manual
@@ -42,12 +43,12 @@ Clone this repository and add it to your `load-path`:
 ```elisp
 (add-to-list 'load-path "/path/to/agent-shell-dispatch")
 (require 'agent-shell-dispatch)
-(agent-shell-dispatch-render-global-mode 1)
+(agent-shell-dispatch-global-mode 1)
 ```
 
 ### Global render mode
 
-`agent-shell-dispatch-render-global-mode` installs advice on the agent-shell header update function and a theme change hook. These are no-ops in buffers without active dispatch state (all state is buffer-local), so it's safe to enable unconditionally. Without it, the task graph won't render.
+`agent-shell-dispatch-global-mode` installs advice for header rendering, message queue draining, session mode propagation, and a theme change hook. All are no-ops in buffers without active dispatch state (all state is buffer-local), so it's safe to enable unconditionally. Without it, the task graph won't render and session mode changes won't propagate to subagents.
 
 ## Requirements
 
@@ -147,7 +148,7 @@ All dispatch and render state is buffer-local, so multiple independent dispatch 
 | `agent-shell-dispatch-report` | Report task status -- dispatcher only |
 | `agent-shell-dispatch-interrupt-agent` | Interrupt a running agent |
 | `agent-shell-dispatch-kill-agents` | Kill all dispatch agents and stop rendering |
-| `agent-shell-dispatch-render-global-mode` | Global minor mode -- installs advice and theme hook |
+| `agent-shell-dispatch-global-mode` | Global minor mode -- installs all advice (render, queue drain, mode propagation) |
 | `agent-shell-dispatch-render-mode` | Buffer-local minor mode -- manages heartbeat timer |
 
 ## License

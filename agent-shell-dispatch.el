@@ -74,11 +74,37 @@ this ensures the request is processed once the dispatcher goes idle."
                         (derived-mode-p 'agent-shell-mode))
                (agent-shell--process-pending-request)))))))))
 
+;; -- Session mode propagation --
+
+(defun agent-shell-dispatch--propagate-session-mode (&rest args)
+  "Propagate session mode changes from the dispatcher to its subagents.
+Fires as :after advice on `agent-shell--set-default-session-mode'.
+Only acts when the changed buffer has active dispatch state (is a dispatcher).
+Subagent buffers have nil state, so no recursion."
+  (let ((shell-buf (plist-get args :shell-buffer))
+        (mode-id (plist-get args :mode-id)))
+    (when (and shell-buf mode-id)
+      (when-let* ((buf (get-buffer shell-buf)))
+        (with-current-buffer buf
+          (when-let* ((state agent-shell-dispatch--state)
+                      (tasks (agent-shell-dispatch-state-tasks state)))
+            (let ((self (buffer-name))
+                  (seen (make-hash-table :test 'equal)))
+              (dolist (task tasks)
+                (let ((agent-buf (plist-get task :agent)))
+                  (when (and agent-buf
+                             (not (equal agent-buf self))
+                             (not (gethash agent-buf seen))
+                             (get-buffer agent-buf))
+                    (puthash agent-buf t seen)
+                    (agent-shell--set-default-session-mode
+                     :shell-buffer agent-buf
+                     :mode-id mode-id)))))))))))
+
 ;; -- Dispatch task graph and progress rendering --
 
 (defun agent-shell-dispatch--clear-state ()
   "Clear dispatch state. Used as teardown hook."
-  (advice-remove 'shell-maker-finish-output #'agent-shell-dispatch--drain-queue)
   (setq agent-shell-dispatch--state nil))
 
 
@@ -180,8 +206,9 @@ TASKS is a list of plists: ((:id ID :name NAME :agent AGENT-BUF) ...)."
            :dispatcher-buffer dispatcher-buffer
            :tasks normalized
            :statuses (make-hash-table :test 'equal)))
-    ;; Install queue-drain advice for message processing
-    (advice-add 'shell-maker-finish-output :after #'agent-shell-dispatch--drain-queue)
+    ;; Auto-enable global mode if not already on
+    (unless agent-shell-dispatch-global-mode
+      (agent-shell-dispatch-global-mode 1))
     ;; Set up render module
     (add-hook 'agent-shell-dispatch-render-teardown-hook
               #'agent-shell-dispatch--clear-state)
@@ -359,6 +386,41 @@ Returns t on success, nil if buffer not found."
     (with-current-buffer buf
       (agent-shell-interrupt t))
     t))
+
+;; -- Global minor mode --
+
+(define-globalized-minor-mode agent-shell-dispatch-global-mode
+  agent-shell-dispatch--global-dummy
+  agent-shell-dispatch--global-dummy
+  "Global minor mode for agent-shell-dispatch.
+Installs advice for header rendering, queue draining, session mode
+propagation, and a theme change hook.  All are no-ops in buffers
+without active dispatch state (buffer-local).
+Enable in your config: (agent-shell-dispatch-global-mode 1)"
+  :group 'agent-shell
+  (if agent-shell-dispatch-global-mode
+      (progn
+        (when agent-shell-dispatch-render-advice-target
+          (advice-add agent-shell-dispatch-render-advice-target
+                      :after #'agent-shell-dispatch-render--extend-header))
+        (advice-add 'shell-maker-finish-output
+                    :after #'agent-shell-dispatch--drain-queue)
+        (advice-add 'agent-shell--set-default-session-mode
+                    :after #'agent-shell-dispatch--propagate-session-mode)
+        (add-hook 'enable-theme-functions
+                  #'agent-shell-dispatch-render--on-theme-change))
+    (when agent-shell-dispatch-render-advice-target
+      (advice-remove agent-shell-dispatch-render-advice-target
+                     #'agent-shell-dispatch-render--extend-header))
+    (advice-remove 'shell-maker-finish-output
+                   #'agent-shell-dispatch--drain-queue)
+    (advice-remove 'agent-shell--set-default-session-mode
+                   #'agent-shell-dispatch--propagate-session-mode)
+    (remove-hook 'enable-theme-functions
+                 #'agent-shell-dispatch-render--on-theme-change)))
+
+(defun agent-shell-dispatch--global-dummy (&rest _)
+  "No-op turn-on function for the globalized minor mode.")
 
 (provide 'agent-shell-dispatch)
 ;;; agent-shell-dispatch.el ends here
