@@ -36,7 +36,7 @@ ALPHA=1.0 returns COLOR1, ALPHA=0.0 returns COLOR2."
                (:constructor agent-shell-dispatch-render-theme-make)
                (:copier nil))
   "Resolved color scheme from current Emacs theme."
-  bg fg name-fg dim arrow pill-bg font char-w
+  bg fg name-fg dim arrow pill-bg font
   status) ;; alist of (symbol . agent-shell-dispatch-render-status-style)
 
 (cl-defstruct (agent-shell-dispatch-render-task
@@ -182,17 +182,11 @@ Respects face remapping (e.g. `solaire-mode') in the dispatcher buffer."
          (dim (or (face-foreground 'font-lock-comment-face nil t) "#75715e"))
          (fnc (or (face-foreground 'font-lock-function-name-face nil t) fg))
          (tint 0.2))
-    (let* ((svg-font-size (plist-get agent-shell-dispatch-render--layout :node-font-size))
-           (font-family (or (ignore-errors
+    (let* ((font-family (or (ignore-errors
                               (symbol-name (font-get (face-attribute 'default :font) :family)))
-                            "monospace"))
-           (sample (propertize "MMMMMMMMMM" 'face
-                               `(:family ,(replace-regexp-in-string "\\\\" "" font-family)
-                                 :height ,(* svg-font-size 10))))
-           (char-w (* 0.85 (/ (float (string-pixel-width sample)) 10.0))))
+                            "monospace")))
       (agent-shell-dispatch-render-theme-make
        :bg bg :fg fg :name-fg fnc :dim dim
-       :char-w char-w
        :font (replace-regexp-in-string "\\\\" "" font-family)
        :arrow (agent-shell-dispatch-render--blend-colors dim bg 0.6)
        :pill-bg (agent-shell-dispatch-render--blend-colors dim bg 0.25)
@@ -297,10 +291,15 @@ Returns a hash of level → stack-info, or nil if not needed."
 (defun agent-shell-dispatch-render--node-wrap-lines (name node-w)
   "Wrap NAME to fit within NODE-W pixels. Returns list of lines."
   (let* ((L agent-shell-dispatch-render--layout)
-         (char-w (agent-shell-dispatch-render-theme-char-w (agent-shell-dispatch-render--theme-colors)))
+         (theme (agent-shell-dispatch-render--theme-colors))
+         (font (agent-shell-dispatch-render-theme-font theme))
+         (font-size (plist-get L :node-font-size))
          (text-start (+ (plist-get L :node-pad-x) (plist-get L :node-icon-w)))
-         (avail-chars (max 10 (/ (- node-w text-start (plist-get L :node-pad-x))
-                                 (max 1 char-w)))))
+         (avail-px (- node-w text-start 8))
+         ;; Estimate chars from pixel width of a reference character
+         (avg-char-w (max 1 (/ (float (agent-shell-dispatch-render--text-pixel-width
+                                        "M" font font-size)) 1.0)))
+         (avail-chars (max 10 (floor (/ avail-px avg-char-w)))))
     (agent-shell-dispatch-render--wrap-text name avail-chars)))
 
 (defun agent-shell-dispatch-render--task-node-height (task node-w)
@@ -316,10 +315,12 @@ Returns a hash of level → stack-info, or nil if not needed."
   "Compute per-column widths from COLUMNS hash.
 MAX-LEVEL is the highest level index.
 When STACK-MAP is non-nil, paired levels share width."
-  (let ((L agent-shell-dispatch-render--layout)
-        (max-name-len (plist-get agent-shell-dispatch-render--layout :name-max-len))
-        (char-w (agent-shell-dispatch-render-theme-char-w (agent-shell-dispatch-render--theme-colors)))
-        (widths (make-hash-table)))
+  (let* ((L agent-shell-dispatch-render--layout)
+         (theme (agent-shell-dispatch-render--theme-colors))
+         (font (agent-shell-dispatch-render-theme-font theme))
+         (font-size (plist-get L :node-font-size))
+         (max-name-len (plist-get L :name-max-len))
+         (widths (make-hash-table)))
     (cl-loop for lv from 0 to max-level
              for stack-info = (and stack-map (gethash lv stack-map))
              unless (and stack-info (eq (agent-shell-dispatch-render-stack-info-position stack-info) 'bottom))
@@ -327,17 +328,19 @@ When STACK-MAP is non-nil, paired levels share width."
                         (if (and stack-info (eq (agent-shell-dispatch-render-stack-info-position stack-info) 'top))
                             (list lv (agent-shell-dispatch-render-stack-info-peer-level stack-info))
                           (list lv)))
-                       (max-line-len
+                       (max-text-px
                         (cl-loop for mlv in levels-to-measure
                                  for col = (gethash mlv columns)
                                  maximize (cl-loop for t_ in col
                                                    for lines = (agent-shell-dispatch-render--wrap-text
                                                                 (plist-get t_ :name) max-name-len)
                                                    maximize (cl-loop for line in lines
-                                                                     maximize (length line)))))
-                       (w (min (+ (* 2 (plist-get L :node-pad-x))
+                                                                     maximize (agent-shell-dispatch-render--text-pixel-width
+                                                                               line font font-size)))))
+                       (w (min (+ (plist-get L :node-pad-x)
                                   (plist-get L :node-icon-w)
-                                  (* char-w max-line-len))
+                                  max-text-px
+                                  8) ;; right pad balances icon weight
                                (plist-get L :node-max-w))))
                   (puthash lv w widths)
                   (when (and stack-info (eq (agent-shell-dispatch-render-stack-info-position stack-info) 'top))
@@ -503,13 +506,20 @@ Returns edge positions."
 
 ;; ── Agent activity column ────────────────────────────────────────────
 
+(defun agent-shell-dispatch-render--text-pixel-width (text font-family svg-font-size)
+  "Measure pixel width of TEXT as it would render in SVG.
+SVG-FONT-SIZE is in px; convert to Emacs face height (1/10 pt)."
+  (let* ((height (round (* svg-font-size 7.5))) ;; px → 1/10 pt (96dpi: 1px ≈ 0.75pt)
+         (sample (propertize text 'face
+                             `(:family ,font-family :height ,height))))
+    (string-pixel-width sample)))
+
 (defun agent-shell-dispatch-render--agent-layout (agents h theme)
   "Compute per-column layout for agent activity display.
 Returns a plist (:total-w WIDTH :columns COLS :per-col N :sorted LIST).
 Each entry in COLS is (:x X :w W :agents LIST-OF-INFO)."
-  (let* ((base-char-w (agent-shell-dispatch-render-theme-char-w theme))
-         (font-size (plist-get agent-shell-dispatch-render--layout :node-font-size))
-         (char-w (* base-char-w (/ (- font-size 2.0) font-size) 0.92))
+  (let* ((font (agent-shell-dispatch-render-theme-font theme))
+         (font-size (- (plist-get agent-shell-dispatch-render--layout :node-font-size) 2))
          (pad-x 2) (row-h 16) (col-gap 4)
          (avail-h (- h 6))
          (sorted (let (entries)
@@ -519,15 +529,16 @@ Each entry in COLS is (:x X :w W :agents LIST-OF-INFO)."
                                             (agent-shell-dispatch-agent-info-name b))))))
          (n (length sorted))
          (per-col (max 1 (floor avail-h row-h)))
-         ;; Split into columns and compute per-column width
          (cols nil)
          (cur-x 0))
     (cl-loop for start from 0 by per-col
              while (< start n)
              for col-agents = (seq-subseq sorted start (min (+ start per-col) n))
-             for max-len = (cl-loop for info in col-agents
-                                    maximize (length (agent-shell-dispatch-agent-info-name info)))
-             for w = (+ (* 2 pad-x) (* char-w max-len))
+             for max-pw = (cl-loop for info in col-agents
+                                   maximize (agent-shell-dispatch-render--text-pixel-width
+                                             (agent-shell-dispatch-agent-info-name info)
+                                             font font-size))
+             for w = (+ (* 2 pad-x) max-pw)
              do (push (list :x cur-x :w w :agents col-agents) cols)
              (setq cur-x (+ cur-x w col-gap)))
     (list :total-w (max 0 (- cur-x col-gap))
