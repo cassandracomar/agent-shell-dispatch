@@ -76,24 +76,30 @@ this ensures the request is processed once the dispatcher goes idle."
 
 ;; -- Session mode propagation --
 
-(defun agent-shell-dispatch--propagate-session-mode (&rest args)
-  "Propagate session mode changes from the dispatcher to its subagents.
-Fires as :after advice on `agent-shell--set-default-session-mode'.
-Only acts when the changed buffer has active dispatch state (is a dispatcher).
-Subagent buffers have nil state, so no recursion."
-  (let ((shell-buf (plist-get args :shell-buffer))
-        (mode-id (plist-get args :mode-id)))
-    (when (and shell-buf mode-id)
-      (when-let* ((buf (get-buffer shell-buf)))
-        (with-current-buffer buf
-          (when-let* ((state agent-shell-dispatch--state)
-                      (agents (agent-shell-dispatch-state-agents state)))
-            (maphash (lambda (agent-buf _)
-                       (when (get-buffer agent-buf)
-                         (agent-shell--set-default-session-mode
-                          :shell-buffer agent-buf
-                          :mode-id mode-id)))
-                     agents)))))))
+(defun agent-shell-dispatch--propagate-mode-to-agents ()
+  "Propagate the current buffer's session mode to all dispatch subagents.
+Call from any buffer with active dispatch state."
+  (when-let* ((state agent-shell-dispatch--state)
+              (agents (agent-shell-dispatch-state-agents state))
+              (mode-id (cdr (assq :mode-id (map-elt agent-shell--state :session)))))
+    (maphash (lambda (agent-buf _)
+               (when-let* ((abuf (get-buffer agent-buf)))
+                 (with-current-buffer abuf
+                   (when-let* ((session (map-elt agent-shell--state :session)))
+                     (map-put! session :mode-id mode-id)
+                     (agent-shell--update-header-and-mode-line)))))
+             agents)))
+
+(defun agent-shell-dispatch--propagate-session-mode (orig-fn &rest args)
+  "Wrap session mode changes to propagate to subagents on success.
+:around advice on `agent-shell-cycle-session-mode' and `agent-shell-set-session-mode'."
+  (if agent-shell-dispatch--state
+      (let ((on-success (car args)))
+        (funcall orig-fn
+                 (lambda ()
+                   (when on-success (funcall on-success))
+                   (agent-shell-dispatch--propagate-mode-to-agents))))
+    (apply orig-fn args)))
 
 ;; -- Dispatch task graph and progress rendering --
 
@@ -406,8 +412,10 @@ Enable in your config: (agent-shell-dispatch-global-mode 1)"
                       :after #'agent-shell-dispatch-render--extend-header))
         (advice-add 'shell-maker-finish-output
                     :after #'agent-shell-dispatch--drain-queue)
-        (advice-add 'agent-shell--set-default-session-mode
-                    :after #'agent-shell-dispatch--propagate-session-mode)
+        (advice-add 'agent-shell-cycle-session-mode
+                    :around #'agent-shell-dispatch--propagate-session-mode)
+        (advice-add 'agent-shell-set-session-mode
+                    :around #'agent-shell-dispatch--propagate-session-mode)
         (add-hook 'enable-theme-functions
                   #'agent-shell-dispatch-render--on-theme-change))
     (when agent-shell-dispatch-render-advice-target
@@ -415,7 +423,9 @@ Enable in your config: (agent-shell-dispatch-global-mode 1)"
                      #'agent-shell-dispatch-render--extend-header))
     (advice-remove 'shell-maker-finish-output
                    #'agent-shell-dispatch--drain-queue)
-    (advice-remove 'agent-shell--set-default-session-mode
+    (advice-remove 'agent-shell-cycle-session-mode
+                   #'agent-shell-dispatch--propagate-session-mode)
+    (advice-remove 'agent-shell-set-session-mode
                    #'agent-shell-dispatch--propagate-session-mode)
     (remove-hook 'enable-theme-functions
                  #'agent-shell-dispatch-render--on-theme-change)))
