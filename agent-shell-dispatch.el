@@ -229,16 +229,18 @@ Also stops dispatch polling. Returns the number of agents killed."
   (let ((tasks (and agent-shell-dispatch--state (agent-shell-dispatch-state-tasks agent-shell-dispatch--state)))
         (self (buffer-name)))
     (agent-shell-dispatch-stop)
-    (cl-loop for task in tasks
-             for buf-name = (plist-get task :agent)
-             unless (or (null buf-name) (equal buf-name self))
-             do (when-let* ((buf (get-buffer buf-name))
-                            (proc (get-buffer-process buf)))
-                  (set-process-query-on-exit-flag proc nil)
-                  (delete-process proc))
-             (when-let* ((buf (get-buffer buf-name)))
-               (kill-buffer buf))
-             and count t)))
+    (let ((kill-buffer-query-functions nil)
+          (confirm-kill-processes nil))
+      (cl-loop for task in tasks
+               for buf-name = (plist-get task :agent)
+               unless (or (null buf-name) (equal buf-name self))
+               do (when-let* ((buf (get-buffer buf-name))
+                              (proc (get-buffer-process buf)))
+                    (set-process-query-on-exit-flag proc nil)
+                    (delete-process proc))
+               (when-let* ((buf (get-buffer buf-name)))
+                 (kill-buffer buf))
+               and count t))))
 
 ;; -- Start function for spawned agents --
 

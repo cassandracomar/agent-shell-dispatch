@@ -28,7 +28,8 @@ Code blocks below show the elisp to evaluate. Wrap them with whichever method yo
 1. **Plan**: Read the plan file, or summarize from conversation
 2. **Task list**: Extract independent tasks with clear boundaries
 3. **Project state**: Current branch, recent commits, key files
-4. **User parameters** (ask if not specified):
+4. **Elisp eval method**: Determine which method YOU have for evaluating elisp (see "Evaluating Elisp" above). Test it now — the method that works for you is the one subagents will have too. Record the exact tool name or command so you can bake it into the subagent template (replacing the generic "Evaluating Elisp" section with a concrete instruction like "Use the `mcp__emacs__emacs_eval_elisp` tool to evaluate elisp").
+5. **User parameters** (ask if not specified):
    - Number of impl agents (default: 2, max: 3)
    - Review policy: `per-task`, `batch`, or `none`
 
@@ -113,7 +114,9 @@ When the review policy requires reviews:
 3. If the reviewer requests changes → send the feedback directly to the implementer via `agent-shell-dispatch-send-to-agent`. The implementer fixes and sends a new `[Task Complete]`. Re-review.
 4. Repeat until the reviewer passes
 
-**Fix-loop shortcut:** For efficiency, instruct the reviewer to send change requests directly to the implementer using `agent-shell-dispatch-send-to-agent`, and have the implementer message the reviewer back when fixed. The dispatcher only gets notified of the final pass/fail outcome — no need to relay every round-trip.
+**Fix-loop shortcut:** For efficiency, instruct the reviewer to send change requests directly to the implementer using `agent-shell-dispatch-send-to-agent`, and have the implementer message the reviewer back when fixed. The dispatcher only gets notified of the final pass/fail outcome — no need to relay every round-trip. When setting up a fix-loop, tell BOTH sides:
+- **Reviewer:** "Send change requests directly to the implementer at BUFFER-NAME. Wait for their reply before re-reviewing."
+- **Implementer:** "After fixing, notify the reviewer at BUFFER-NAME that changes are ready for re-review using `agent-shell-dispatch-send-to-agent`."
 
 **Multi-stage reviews:** If a task requires multiple review stages (e.g. correctness → style → integration), define all stages upfront in the reviewer's assignment. Each stage reports its outcome. If all stages pass in one go, a single `[Task Complete]` suffices.
 

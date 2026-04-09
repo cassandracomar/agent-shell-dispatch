@@ -4,8 +4,10 @@ TASK_DESCRIPTION
 
 ## Evaluating Elisp
 
-You need to evaluate elisp in the running Emacs instance for status reporting and messaging. Use whichever method is available, in order of preference:
+DISPATCHER: Replace this section with the specific method you discovered in Step 1, e.g.:
+"Use the `mcp__emacs__emacs_eval_elisp` tool to evaluate all elisp in this template."
 
+Fallback (if dispatcher did not replace this section):
 1. **Emacs MCP** — an `emacs_eval_elisp` tool (exact name depends on MCP server configuration)
 2. **Emacs skill** — a skill like `describe` that evaluates elisp
 3. **emacsclient** — `emacsclient --eval '(elisp-form)'` via Bash
@@ -13,7 +15,8 @@ You need to evaluate elisp in the running Emacs instance for status reporting an
 ## Instructions
 - Work in the project directory
 - **Do NOT call `agent-shell-dispatch-report` or `agent-shell-dispatch-start`** — the dispatcher manages all task graph updates. Calling these yourself will corrupt the shared dispatch state.
-- Communicate with the dispatcher via messages only (see below).
+- **Do NOT use the SendMessage tool** — it does not reach the dispatcher. Use the elisp messaging functions below instead.
+- Communicate with the dispatcher via elisp messages only (see below).
 
 ## Messaging (to dispatcher buffer)
 
