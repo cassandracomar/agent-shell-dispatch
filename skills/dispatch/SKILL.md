@@ -43,28 +43,26 @@ First, register your buffer as the dispatcher so permission requests render here
 
 Then spawn agents. They run in the background (no popup, no prompts, acceptEdits mode). Non-edit permissions (bash, etc.) render as button dialogs in YOUR buffer — the user handles them directly. You do NOT handle permissions.
 
+**Use short names** (e.g. "Impl-1", "Rev-1") — these appear in the agent activity column in the header, so brevity matters.
+
 ```elisp
 (agent-shell-dispatch-spawn-agent
  default-directory
  "Impl-1"
- "You are implementation agent 1. Wait for your task assignment.")
+ "You are Impl-1. Wait for your task assignment.")
 ```
 
-Repeat for each agent. Then verify:
-
-```elisp
-(agent-shell-dispatch-list-agents)
-```
-
-Note exact buffer names.
+Repeat for each agent.
 
 ## Step 3: Assign Tasks and Start Task Graph
 
-Send each agent its task using the subagent template. Read `SUBAGENT_TEMPLATE.md` (in the same directory as this skill) and customize it per task — replace TASK_NAME, TASK_ID, TASK_DESCRIPTION, and CRITERIA with the actual values. Then send via:
+Send each agent its task using the subagent template. Read `SUBAGENT_TEMPLATE.md` (in the same directory as this skill) and customize it per task — replace TASK_NAME, TASK_ID, TASK_DESCRIPTION, and CRITERIA with the actual values.
+
+Use `agent-shell-dispatch-agent-buffer` to resolve the short agent name to its full buffer name:
 
 ```elisp
 (agent-shell-dispatch-send-to-agent
- "EXACT-BUFFER-NAME"
+ (agent-shell-dispatch-agent-buffer "Impl-1")
  "CUSTOMIZED-TEMPLATE-CONTENT"
  "dispatcher")
 ```
@@ -115,8 +113,8 @@ When the review policy requires reviews:
 4. Repeat until the reviewer passes
 
 **Fix-loop shortcut:** For efficiency, instruct the reviewer to send change requests directly to the implementer using `agent-shell-dispatch-send-to-agent`, and have the implementer message the reviewer back when fixed. The dispatcher only gets notified of the final pass/fail outcome — no need to relay every round-trip. When setting up a fix-loop, tell BOTH sides:
-- **Reviewer:** "Send change requests directly to the implementer at BUFFER-NAME. Wait for their reply before re-reviewing."
-- **Implementer:** "After fixing, notify the reviewer at BUFFER-NAME that changes are ready for re-review using `agent-shell-dispatch-send-to-agent`."
+- **Reviewer:** "Send change requests directly to the implementer: `(agent-shell-dispatch-send-to-agent (agent-shell-dispatch-agent-buffer \"Impl-1\") MESSAGE)`. Wait for their reply before re-reviewing."
+- **Implementer:** "After fixing, notify the reviewer: `(agent-shell-dispatch-send-to-agent (agent-shell-dispatch-agent-buffer \"Rev-1\") MESSAGE)`. Include what you changed."
 
 **Multi-stage reviews:** If a task requires multiple review stages (e.g. correctness → style → integration), define all stages upfront in the reviewer's assignment. Each stage reports its outcome. If all stages pass in one go, a single `[Task Complete]` suffices.
 
@@ -143,7 +141,7 @@ directly — you do NOT accept or reject on their behalf.
 ### If user says an agent needs help:
 View that agent's output and send it guidance:
 ```elisp
-(agent-shell-dispatch-view-agent "BUFFER-NAME" 200)
+(agent-shell-dispatch-view-agent (agent-shell-dispatch-agent-buffer "Impl-1") 200)
 ```
 
 ## Step 5: Completion
@@ -174,6 +172,7 @@ When the user tells you all tasks are complete:
 | Action | Function |
 |--------|----------|
 | Spawn agent | `(agent-shell-dispatch-spawn-agent DIR NAME MSG)` |
+| Resolve agent name | `(agent-shell-dispatch-agent-buffer NAME)` → buffer name |
 | Send message | `(agent-shell-dispatch-send-to-agent BUF MSG FROM)` |
 | List agents | `(agent-shell-dispatch-list-agents)` |
 | View output | `(agent-shell-dispatch-view-agent BUF LINES)` |
@@ -189,7 +188,7 @@ When the user tells you all tasks are complete:
 
 - You ARE the dispatcher. Don't start a separate session.
 - ALL agent management via elisp evaluation in Emacs.
-- Use `agent-shell-dispatch-list-agents` to discover buffer names.
+- Use `(agent-shell-dispatch-agent-buffer "Name")` to resolve agent names to buffer names.
 - Assign ONE task per agent at a time.
 - Permissions are shown directly to the user — do NOT accept or reject on their behalf.
 - Do NOT poll or check statuses in a loop — the elisp timer handles progress.

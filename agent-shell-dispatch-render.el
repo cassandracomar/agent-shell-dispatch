@@ -501,6 +501,78 @@ Returns edge positions."
     (let ((rx (plist-get L :node-rx)))
       (agent-shell-dispatch-render-node-edges-make :left-x (+ x rx) :right-x (- (+ x w) rx) :cy cy))))
 
+;; ── Agent activity column ────────────────────────────────────────────
+
+(defun agent-shell-dispatch-render--agent-layout (agents h theme)
+  "Compute per-column layout for agent activity display.
+Returns a plist (:total-w WIDTH :columns COLS :per-col N :sorted LIST).
+Each entry in COLS is (:x X :w W :agents LIST-OF-INFO)."
+  (let* ((base-char-w (agent-shell-dispatch-render-theme-char-w theme))
+         (font-size (plist-get agent-shell-dispatch-render--layout :node-font-size))
+         (char-w (* base-char-w (/ (- font-size 2.0) font-size) 0.92))
+         (pad-x 2) (row-h 16) (col-gap 4)
+         (avail-h (- h 6))
+         (sorted (let (entries)
+                   (maphash (lambda (_buf info) (push info entries)) agents)
+                   (sort entries (lambda (a b)
+                                   (string< (agent-shell-dispatch-agent-info-name a)
+                                            (agent-shell-dispatch-agent-info-name b))))))
+         (n (length sorted))
+         (per-col (max 1 (floor avail-h row-h)))
+         ;; Split into columns and compute per-column width
+         (cols nil)
+         (cur-x 0))
+    (cl-loop for start from 0 by per-col
+             while (< start n)
+             for col-agents = (seq-subseq sorted start (min (+ start per-col) n))
+             for max-len = (cl-loop for info in col-agents
+                                    maximize (length (agent-shell-dispatch-agent-info-name info)))
+             for w = (+ (* 2 pad-x) (* char-w max-len))
+             do (push (list :x cur-x :w w :agents col-agents) cols)
+             (setq cur-x (+ cur-x w col-gap)))
+    (list :total-w (max 0 (- cur-x col-gap))
+          :columns (nreverse cols)
+          :per-col per-col)))
+
+(defun agent-shell-dispatch-render--agent-column-width (agents h theme)
+  "Compute total pixel width needed for the agent column(s)."
+  (plist-get (agent-shell-dispatch-render--agent-layout agents h theme) :total-w))
+
+(defun agent-shell-dispatch-render--draw-agent-column (svg agents x h theme)
+  "Draw agent activity indicators as labeled boxes on SVG at X.
+Filled box = busy, hollow box = idle. Per-column width fits tightest name."
+  (let* ((L agent-shell-dispatch-render--layout)
+         (font (agent-shell-dispatch-render-theme-font theme))
+         (font-size (plist-get L :node-font-size))
+         (pad-x 2) (row-h 16) (box-h 14) (rx 3)
+         (ok (or (face-foreground 'success nil t) "#b6e63e"))
+         (dim (agent-shell-dispatch-render-theme-dim theme))
+         (bg (agent-shell-dispatch-render-theme-bg theme))
+         (busy-bg (agent-shell-dispatch-render--blend-colors ok bg 0.2))
+         (layout (agent-shell-dispatch-render--agent-layout agents h theme)))
+    (dolist (col (plist-get layout :columns))
+      (let* ((col-x (+ x (plist-get col :x)))
+             (col-w (plist-get col :w))
+             (col-agents (plist-get col :agents))
+             (col-count (length col-agents))
+             (total-col-h (* row-h col-count))
+             (start-y (/ (- h total-col-h) 2)))
+        (cl-loop for info in col-agents
+                 for row from 0
+                 for name = (agent-shell-dispatch-agent-info-name info)
+                 for busy = (agent-shell-dispatch-agent-info-busy info)
+                 for by = (+ start-y (* row row-h) (/ (- row-h box-h) 2))
+                 for text-y = (+ by box-h -3)
+                 do (if busy
+                        (svg-rectangle svg col-x by col-w box-h
+                                       :fill busy-bg :stroke ok :stroke-width "1" :rx rx)
+                      (svg-rectangle svg col-x by col-w box-h
+                                       :fill "none" :stroke dim :stroke-width "0.75" :rx rx))
+                 (svg-text svg name
+                           :x (+ col-x pad-x) :y text-y
+                           :fill (if busy ok dim)
+                           :font-size (- font-size 2) :font-family font))))))
+
 ;; ── Edge routing ────────────────────────────────────────────────────
 
 (defun agent-shell-dispatch-render--compute-col-bounds (node-edges leveled task-heights node-h &optional stack-map)
@@ -767,10 +839,11 @@ Returns a `agent-shell-dispatch-render-ctx' for `agent-shell-dispatch-render-dra
        :canvas canvas
        :has-bypass has-bypass))))
 
-(defun agent-shell-dispatch-render-draw (ctx status-map)
-  "Draw SVG from cached CTX with current STATUS-MAP.
+(defun agent-shell-dispatch-render-draw (ctx status-map &optional agents)
+  "Draw SVG from cached CTX with current STATUS-MAP and optional AGENTS hash.
 CTX is a agent-shell-dispatch-render-ctx from `agent-shell-dispatch-render-prepare'.
-STATUS-MAP is a hash of task-id -> agent-shell-dispatch-render-task-status."
+STATUS-MAP is a hash of task-id -> agent-shell-dispatch-render-task-status.
+AGENTS is a hash of buffer-name -> agent-shell-dispatch-agent-info."
   (let* ((L agent-shell-dispatch-render--layout)
          (theme (agent-shell-dispatch-render--theme-colors))
          (topo (agent-shell-dispatch-render-ctx-topo ctx))
@@ -779,14 +852,22 @@ STATUS-MAP is a hash of task-id -> agent-shell-dispatch-render-task-status."
          (h (agent-shell-dispatch-render-dimensions-h canvas))
          (node-positions (agent-shell-dispatch-render-ctx-node-positions ctx))
          (leveled (agent-shell-dispatch-render-topology-leveled topo))
-         (svg (svg-create w h)))
+         ;; Compute agent column width first (tight padding)
+         (agent-col-w (if (and agents (> (hash-table-count agents) 0))
+                          (+ (agent-shell-dispatch-render--agent-column-width agents h theme) 8)
+                        0))
+         (svg (svg-create (+ w agent-col-w) h)))
 
     ;; Background
-    (svg-rectangle svg 0 0 w h
+    (svg-rectangle svg 0 0 (+ w agent-col-w) h
                    :fill (agent-shell-dispatch-render-theme-bg theme)
                    :rx (plist-get L :bg-rx))
 
-    ;; Task nodes — inject current status into task plists for draw-task-node
+    ;; Agent activity column (left side, no margin — header provides padding)
+    (when (> agent-col-w 0)
+      (agent-shell-dispatch-render--draw-agent-column svg agents 0 h theme))
+
+    ;; Task nodes — offset by agent column width
     (dolist (task leveled)
       (let* ((id (plist-get task :id))
              (pos (gethash id node-positions))
@@ -797,20 +878,20 @@ STATUS-MAP is a hash of task-id -> agent-shell-dispatch-render-task-status."
                                                'not-started))))
         (agent-shell-dispatch-render--draw-task-node
          svg
-         (agent-shell-dispatch-render-node-pos-x pos)
+         (+ (agent-shell-dispatch-render-node-pos-x pos) agent-col-w)
          (agent-shell-dispatch-render-node-pos-y pos)
          (agent-shell-dispatch-render-node-pos-w pos)
          (agent-shell-dispatch-render-node-pos-h pos)
          task-with-status theme)))
 
-    ;; Arrows from pre-computed specs
+    ;; Arrows from pre-computed specs (offset by agent column)
     (let ((arrow-color (agent-shell-dispatch-render-theme-arrow theme)))
       (dolist (spec (agent-shell-dispatch-render-ctx-arrow-specs ctx))
         (agent-shell-dispatch-render--draw-arrow
          svg
-         (agent-shell-dispatch-render-arrow-spec-x1 spec)
+         (+ (agent-shell-dispatch-render-arrow-spec-x1 spec) agent-col-w)
          (agent-shell-dispatch-render-arrow-spec-y1 spec)
-         (agent-shell-dispatch-render-arrow-spec-x2 spec)
+         (+ (agent-shell-dispatch-render-arrow-spec-x2 spec) agent-col-w)
          (agent-shell-dispatch-render-arrow-spec-y2 spec)
          arrow-color
          (agent-shell-dispatch-render-arrow-spec-bypass-y spec)))
@@ -819,8 +900,12 @@ STATUS-MAP is a hash of task-id -> agent-shell-dispatch-render-task-status."
         (let ((top-edges (car sa))
               (bot-pos (cadr sa)))
           (agent-shell-dispatch-render--draw-stack-arrow
-           svg top-edges
-           (agent-shell-dispatch-render-node-pos-x bot-pos)
+           svg
+           (agent-shell-dispatch-render-node-edges-make
+            :left-x (+ (agent-shell-dispatch-render-node-edges-left-x top-edges) agent-col-w)
+            :right-x (+ (agent-shell-dispatch-render-node-edges-right-x top-edges) agent-col-w)
+            :cy (agent-shell-dispatch-render-node-edges-cy top-edges))
+           (+ (agent-shell-dispatch-render-node-pos-x bot-pos) agent-col-w)
            (agent-shell-dispatch-render-node-pos-y bot-pos)
            (agent-shell-dispatch-render-node-pos-w bot-pos)
            arrow-color))))
@@ -885,6 +970,10 @@ DISPATCHER-BUF is the buffer name."
   "Function of no args returning a hash of id → `agent-shell-dispatch-render-task-status'.
 Called every frame by the header renderer.")
 
+(defvar-local agent-shell-dispatch-render-agent-activity-function nil
+  "Function of no args returning the agents hash (buffer-name -> agent-info).
+Called every frame to render the agent activity column.")
+
 (defvar-local agent-shell-dispatch-render-header-function nil
   "Function of no args that triggers a header redisplay.
 Called by the heartbeat timer.")
@@ -928,7 +1017,9 @@ Buffer-local render vars ensure this is a no-op in non-dispatcher buffers."
               (disp (get-text-property 1 'display header-line-format))
               (orig-svg (plist-get (cdr disp) :data)))
     (agent-shell-dispatch-render-cycle-spinner)
-    (let* ((svg (agent-shell-dispatch-render-draw ctx status-map))
+    (let* ((agents (when agent-shell-dispatch-render-agent-activity-function
+                     (funcall agent-shell-dispatch-render-agent-activity-function)))
+           (svg (agent-shell-dispatch-render-draw ctx status-map agents))
            (graph-svg (with-temp-buffer (svg-print svg) (buffer-string)))
            (graph-svg (agent-shell-dispatch-render-apply-viewport graph-svg ctx status-map (buffer-name)))
            (combined (agent-shell-dispatch-render-combine-svgs orig-svg graph-svg -12 10)))
@@ -986,6 +1077,7 @@ Requires `agent-shell-dispatch-render-global-mode' for the advice."
         agent-shell-dispatch-render--task-defs nil
         agent-shell-dispatch-render-buffer nil
         agent-shell-dispatch-render-status-function nil
+        agent-shell-dispatch-render-agent-activity-function nil
         agent-shell-dispatch-render-header-function nil
         agent-shell-dispatch-render-reset-function nil
         agent-shell-dispatch-render-busy-p-function nil

@@ -22,6 +22,12 @@
   "Active dispatch session state."
   dispatcher-buffer tasks statuses agents)
 
+(cl-defstruct (agent-shell-dispatch-agent-info
+               (:constructor agent-shell-dispatch-agent-info-make)
+               (:copier nil))
+  "Tracked agent with display name and activity state."
+  buffer name busy)
+
 (cl-defstruct (agent-shell-dispatch-reported-status
                (:constructor agent-shell-dispatch-reported-status-make)
                (:copier nil))
@@ -82,8 +88,8 @@ Call from any buffer with active dispatch state."
   (when-let* ((state agent-shell-dispatch--state)
               (agents (agent-shell-dispatch-state-agents state))
               (mode-id (cdr (assq :mode-id (map-elt agent-shell--state :session)))))
-    (maphash (lambda (agent-buf _)
-               (when-let* ((abuf (get-buffer agent-buf)))
+    (maphash (lambda (_name info)
+               (when-let* ((abuf (get-buffer (agent-shell-dispatch-agent-info-buffer info))))
                  (with-current-buffer abuf
                    (when-let* ((session (map-elt agent-shell--state :session)))
                      (map-put! session :mode-id mode-id)
@@ -100,6 +106,35 @@ Call from any buffer with active dispatch state."
                    (when on-success (funcall on-success))
                    (agent-shell-dispatch--propagate-mode-to-agents))))
     (apply orig-fn args)))
+
+;; -- Agent activity tracking --
+
+(defun agent-shell-dispatch--update-agent-activity ()
+  "Update busy state for all tracked agents by reading `shell-maker--busy'.
+Called each render frame from the dispatcher buffer."
+  (when-let* ((state agent-shell-dispatch--state)
+              (agents (agent-shell-dispatch-state-agents state)))
+    (maphash (lambda (_name info)
+               (let ((buf (get-buffer (agent-shell-dispatch-agent-info-buffer info))))
+                 (setf (agent-shell-dispatch-agent-info-busy info)
+                       (and buf
+                            (buffer-live-p buf)
+                            (buffer-local-value 'shell-maker--busy buf)))))
+             agents)))
+
+(defun agent-shell-dispatch--get-agents ()
+  "Update busy states and return the agents hash for the renderer."
+  (agent-shell-dispatch--update-agent-activity)
+  (when-let* ((state agent-shell-dispatch--state))
+    (agent-shell-dispatch-state-agents state)))
+
+(defun agent-shell-dispatch-agent-buffer (name)
+  "Look up the full buffer name for agent with display NAME.
+Returns the buffer name string, or nil if not found."
+  (when-let* ((state agent-shell-dispatch--state)
+              (agents (agent-shell-dispatch-state-agents state))
+              (info (gethash name agents)))
+    (agent-shell-dispatch-agent-info-buffer info)))
 
 ;; -- Dispatch task graph and progress rendering --
 
@@ -216,6 +251,7 @@ TASKS is a list of plists: ((:id ID :name NAME :agent AGENT-BUF) ...)."
     (agent-shell-dispatch-render-set-tasks task-defs)
     (setq agent-shell-dispatch-render-buffer dispatcher-buffer
           agent-shell-dispatch-render-status-function #'agent-shell-dispatch--build-status-map
+          agent-shell-dispatch-render-agent-activity-function #'agent-shell-dispatch--get-agents
           agent-shell-dispatch-render-header-function #'agent-shell--update-header-and-mode-line
           agent-shell-dispatch-render-reset-function (lambda ()
                                                        (when (boundp 'agent-shell--header-cache)
@@ -261,8 +297,8 @@ Also stops dispatch rendering. Returns the number of agents killed."
           (confirm-kill-processes nil)
           (count 0))
       (when agents
-        (maphash (lambda (buf-name _)
-                   (when-let* ((buf (get-buffer buf-name)))
+        (maphash (lambda (_name info)
+                   (when-let* ((buf (get-buffer (agent-shell-dispatch-agent-info-buffer info))))
                      (when-let* ((proc (get-buffer-process buf)))
                        (set-process-query-on-exit-flag proc nil)
                        (delete-process proc))
@@ -320,10 +356,15 @@ Returns the buffer name."
                          (agent-shell--process-pending-request))))
                    buf initial-message))
     (when (buffer-live-p buf)
-      ;; Register in dispatcher's agent set
+      ;; Register in dispatcher's agent set (keyed by display name)
       (when-let* ((state agent-shell-dispatch--state)
                   (agents (agent-shell-dispatch-state-agents state)))
-        (puthash (buffer-name buf) t agents))
+        (puthash name
+                 (agent-shell-dispatch-agent-info-make
+                  :buffer (buffer-name buf)
+                  :name name
+                  :busy nil)
+                 agents))
       (buffer-name buf))))
 
 (defun agent-shell-dispatch-list-agents ()

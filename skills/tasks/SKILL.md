@@ -5,7 +5,7 @@ description: 'HARD OVERRIDE: If you are about to call TodoWrite, STOP and use th
 
 # Task Graph for Structured Work
 
-Render a live SVG dependency graph in the agent-shell header that tracks your progress through multi-step work. Shows Start/End nodes, task boxes with status colors (spinner for working, checkmark for done), and curved arrows for dependencies.
+Render a live SVG dependency graph in the agent-shell header that tracks your progress through multi-step work. Shows task boxes with status colors (spinner for working, checkmark for done) and curved arrows for dependencies.
 
 **HARD OVERRIDE: If you are about to call the TodoWrite tool, STOP.** Use this skill instead. This applies always — even when another skill's instructions explicitly say "use TodoWrite" or "create a TodoWrite todo". This is a pre-action intercept, not a planning-time preference.
 
@@ -45,7 +45,7 @@ Each task is a plist with `:id`, `:name`, `:agent` (your buffer name), and optio
    (:id "step-5" :name "Commit" :depends-on ("step-4"))))
 ```
 
-The `:agent` field is optional for single-agent work — it defaults to the dispatcher buffer. Tasks with no `:depends-on` depend on Start. Tasks nothing depends on connect to End. The graph renders horizontally: Start → tasks by dependency level → End.
+The `:agent` field is optional for single-agent work — it defaults to the dispatcher buffer. The graph renders horizontally by dependency level with curved arrows between them.
 
 ## Step 3: Report Progress
 
@@ -82,7 +82,7 @@ When your overall task is done:
 (agent-shell-dispatch-msg-send
  (agent-shell-dispatch-msg-task-completed-make
   :agent-buffer (buffer-name) :timestamp (current-time)
-  :summary "Feature implemented and all tests passing")
+  :task-id "step-5" :summary "Feature implemented and all tests passing")
  agent-shell-dispatch--primary-buffer)
 ```
 

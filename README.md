@@ -12,6 +12,7 @@ Multi-agent dispatch and coordination for [agent-shell](https://github.com/nicho
 - **Permission forwarding** -- tool permission requests from background agents surface as interactive button dialogs in the dispatcher buffer (with ediff support for file diffs)
 - **Inter-agent messaging** -- typed message protocol for progress reports, error reports, input requests, and completion notifications
 - **Dispatcher pattern** -- the primary agent coordinates without implementing; subagents communicate via messages only, and the dispatcher owns all task graph updates
+- **Agent activity tracker** -- a compact column on the left of the task graph shows each agent's busy/idle state in real-time, auto-wrapping to multiple columns when needed
 - **Session mode propagation** -- when you change the dispatcher's session mode (e.g. plan → acceptEdits), the change is automatically forwarded to all subagent sessions so their permission behavior stays in sync
 
 ## Task States
@@ -146,6 +147,7 @@ All dispatch and render state is buffer-local, so multiple independent dispatch 
 | `agent-shell-dispatch-start` | Register tasks and start the SVG task graph |
 | `agent-shell-dispatch-stop` | Stop rendering (state preserved for toggle) |
 | `agent-shell-dispatch-report` | Report task status -- dispatcher only |
+| `agent-shell-dispatch-agent-buffer` | Look up full buffer name from short agent name |
 | `agent-shell-dispatch-interrupt-agent` | Interrupt a running agent |
 | `agent-shell-dispatch-kill-agents` | Kill all dispatch agents and stop rendering |
 | `agent-shell-dispatch-global-mode` | Global minor mode -- installs all advice (render, queue drain, mode propagation) |
