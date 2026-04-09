@@ -217,7 +217,7 @@ Respects face remapping (e.g. `solaire-mode') in the dispatcher buffer."
            (px-per-pt (/ (float (frame-char-height))
                          (/ (face-attribute 'default :height) 10.0)))
            ;; Calibrate text measurement against actual SVG rendering
-           (ref-size (plist-get (agent-shell-dispatch-render--derived-layout) :node-font-size))
+           (ref-size (plist-get agent-shell-dispatch-render--layout :node-font-size))
            (ref-str "MMMMMMMMMM")
            (svg-ref-data (format "<svg xmlns=\"http://www.w3.org/2000/svg\"><text x=\"0\" y=\"%d\" font-size=\"%d\" font-family=\"%s\" fill=\"white\">%s</text></svg>"
                                  ref-size ref-size clean-font ref-str))
