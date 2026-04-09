@@ -36,7 +36,8 @@ ALPHA=1.0 returns COLOR1, ALPHA=0.0 returns COLOR2."
                (:constructor agent-shell-dispatch-render-theme-make)
                (:copier nil))
   "Resolved color scheme from current Emacs theme."
-  bg fg name-fg dim arrow pill-bg font
+  bg fg name-fg dim arrow font px-per-pt svg-text-correction
+  ascent-ratio descent-ratio
   status) ;; alist of (symbol . agent-shell-dispatch-render-status-style)
 
 (cl-defstruct (agent-shell-dispatch-render-task
@@ -121,16 +122,42 @@ ALPHA=1.0 returns COLOR1, ALPHA=0.0 returns COLOR2."
 ;; ── Layout constants ─────────────────────────────────────────────────
 
 (defconst agent-shell-dispatch-render--layout
-  '(:node-h 34 :node-pad 8 :col-gap 50 :margin 10
-    :pill-w 40 :pill-h 28 :pill-rx 14
+  '(:node-v-pad 10 :node-pad-x 4 :node-icon-w 14
     :node-rx 5 :node-max-w 220
-    :node-pad-x 4 :node-icon-w 14 :node-text-y 22
-    :node-font-size 12 :pill-font-size 14
-    :pill-text-y-offset 5 :name-max-len 24
+    :node-font-size 12 :name-max-len 24
+    :col-gap 50 :margin 10
     :arrow-head-len 5 :arrow-head-hw 4.0 :arrow-cp-factor 0.4
     :arrow-stroke-w "1.5" :bg-rx 8
-    :stack-vgap 30 :stack-threshold 5 :stack-arrow-overshoot 40)
-  "Layout constants for the SVG task graph.")
+    :stack-vgap 30 :stack-threshold 5 :stack-arrow-overshoot 40
+    :agent-pad-x 2 :agent-col-gap 4 :agent-box-rx 3 :agent-margin 6)
+  "Layout constants for the SVG task graph.
+Derived at runtime via `agent-shell-dispatch-render--derived-layout':
+  :node-h, :node-text-y, :node-pad, :agent-row-h, :agent-box-h.")
+
+(defvar agent-shell-dispatch-render--derived-layout nil
+  "Cached layout with font-derived values merged in.")
+
+(defun agent-shell-dispatch-render--derived-layout ()
+  "Return layout plist with font-derived values computed from theme metrics."
+  (or agent-shell-dispatch-render--derived-layout
+      (let* ((L agent-shell-dispatch-render--layout)
+             (fs (plist-get L :node-font-size))
+             (lh (agent-shell-dispatch-render--line-height fs))
+             (v-pad (plist-get L :node-v-pad))
+             (ascent (round (* fs (agent-shell-dispatch-render-theme-ascent-ratio
+                                   (agent-shell-dispatch-render--theme-colors)))))
+             (node-h (+ lh (* 2 v-pad)))
+             (node-text-y (+ v-pad ascent))
+             (node-pad (round (* lh 0.6)))
+             (agent-row-h (+ lh 2))
+             (agent-box-h lh))
+        (setq agent-shell-dispatch-render--derived-layout
+              (append (list :node-h node-h
+                            :node-text-y node-text-y
+                            :node-pad node-pad
+                            :agent-row-h agent-row-h
+                            :agent-box-h agent-box-h)
+                      L)))))
 
 ;; ── Spinner ─────────────────────────────────────────────────────────
 
@@ -153,9 +180,10 @@ Caches the result; call `agent-shell-dispatch-render-refresh-theme' to update."
       (setq agent-shell-dispatch-render--theme-cache (agent-shell-dispatch-render--compute-theme-colors))))
 
 (defun agent-shell-dispatch-render-refresh-theme ()
-  "Recompute cached theme colors."
+  "Recompute cached theme colors and derived layout."
   (interactive)
-  (setq agent-shell-dispatch-render--theme-cache (agent-shell-dispatch-render--compute-theme-colors)))
+  (setq agent-shell-dispatch-render--theme-cache (agent-shell-dispatch-render--compute-theme-colors)
+        agent-shell-dispatch-render--derived-layout nil))
 
 (defun agent-shell-dispatch-render--resolve-face (face attr)
   "Resolve FACE's ATTR respecting `face-remapping-alist' in the render buffer."
@@ -184,12 +212,42 @@ Respects face remapping (e.g. `solaire-mode') in the dispatcher buffer."
          (tint 0.2))
     (let* ((font-family (or (ignore-errors
                               (symbol-name (font-get (face-attribute 'default :font) :family)))
-                            "monospace")))
+                            "monospace"))
+           (clean-font (replace-regexp-in-string "\\\\" "" font-family))
+           (px-per-pt (/ (float (frame-char-height))
+                         (/ (face-attribute 'default :height) 10.0)))
+           ;; Calibrate text measurement against actual SVG rendering
+           (ref-size (plist-get (agent-shell-dispatch-render--derived-layout) :node-font-size))
+           (ref-str "MMMMMMMMMM")
+           (svg-ref-data (format "<svg xmlns=\"http://www.w3.org/2000/svg\"><text x=\"0\" y=\"%d\" font-size=\"%d\" font-family=\"%s\" fill=\"white\">%s</text></svg>"
+                                 ref-size ref-size clean-font ref-str))
+           (svg-ref-img (create-image svg-ref-data 'svg t :scale 1))
+           (svg-ref-w (car (image-size svg-ref-img t)))
+           (emacs-height (round (/ (* ref-size 10.0) px-per-pt)))
+           (emacs-ref-w (string-pixel-width
+                         (propertize ref-str 'face
+                                    `(:family ,clean-font :height ,emacs-height))))
+           (svg-text-correction (if (> emacs-ref-w 0)
+                                    (/ (float svg-ref-w) emacs-ref-w)
+                                  1.0))
+           ;; Measure vertical metrics: ascent (no descenders) and full height (with descenders)
+           (svg-ascent-data (format "<svg xmlns=\"http://www.w3.org/2000/svg\"><text x=\"0\" y=\"%d\" font-size=\"%d\" font-family=\"%s\" fill=\"white\">A</text></svg>"
+                                    ref-size ref-size clean-font))
+           (svg-full-data (format "<svg xmlns=\"http://www.w3.org/2000/svg\"><text x=\"0\" y=\"%d\" font-size=\"%d\" font-family=\"%s\" fill=\"white\">Mg</text></svg>"
+                                  ref-size ref-size clean-font))
+           (ascent-h (cdr (image-size (create-image svg-ascent-data 'svg t :scale 1) t)))
+           (full-h (cdr (image-size (create-image svg-full-data 'svg t :scale 1) t)))
+           (descent-h (- full-h ascent-h))
+           (ascent-ratio (/ (float ascent-h) ref-size))
+           (descent-ratio (/ (float descent-h) ref-size)))
       (agent-shell-dispatch-render-theme-make
        :bg bg :fg fg :name-fg fnc :dim dim
-       :font (replace-regexp-in-string "\\\\" "" font-family)
+       :font clean-font
+       :px-per-pt px-per-pt
+       :svg-text-correction svg-text-correction
+       :ascent-ratio ascent-ratio
+       :descent-ratio descent-ratio
        :arrow (agent-shell-dispatch-render--blend-colors dim bg 0.6)
-       :pill-bg (agent-shell-dispatch-render--blend-colors dim bg 0.25)
        :status
        (list (cons 'done       (agent-shell-dispatch-render-status-style-make
                                 :bg (agent-shell-dispatch-render--blend-colors ok  bg tint) :fg ok  :icon "✓"))
@@ -255,7 +313,7 @@ Returns list of (from-id . to-id) pairs for dependency connections."
 Only activates when column count exceeds the stack threshold.
 COLUMNS is the level→task hash, MAX-LEVEL the highest index.
 Returns a hash of level → stack-info, or nil if not needed."
-  (when (>= (1+ max-level) (plist-get agent-shell-dispatch-render--layout :stack-threshold))
+  (when (>= (1+ max-level) (plist-get (agent-shell-dispatch-render--derived-layout) :stack-threshold))
     (let ((stack-map (make-hash-table))
           (lv 0))
       (while (<= lv max-level)
@@ -290,12 +348,15 @@ Returns a hash of level → stack-info, or nil if not needed."
 
 (defun agent-shell-dispatch-render--node-wrap-lines (name node-w)
   "Wrap NAME to fit within NODE-W pixels. Returns list of lines."
-  (let* ((L agent-shell-dispatch-render--layout)
+  (let* ((L (agent-shell-dispatch-render--derived-layout))
          (theme (agent-shell-dispatch-render--theme-colors))
          (font (agent-shell-dispatch-render-theme-font theme))
          (font-size (plist-get L :node-font-size))
          (text-start (+ (plist-get L :node-pad-x) (plist-get L :node-icon-w)))
-         (avail-px (- node-w text-start 8))
+         (right-pad (round (/ (float (plist-get L :node-icon-w))
+                              (agent-shell-dispatch-render-theme-svg-text-correction
+                               (agent-shell-dispatch-render--theme-colors)))))
+         (avail-px (- node-w text-start right-pad))
          ;; Estimate chars from pixel width of a reference character
          (avg-char-w (max 1 (/ (float (agent-shell-dispatch-render--text-pixel-width
                                         "M" font font-size)) 1.0)))
@@ -304,18 +365,18 @@ Returns a hash of level → stack-info, or nil if not needed."
 
 (defun agent-shell-dispatch-render--task-node-height (task node-w)
   "Compute the height needed for TASK given NODE-W."
-  (let* ((L agent-shell-dispatch-render--layout)
+  (let* ((L (agent-shell-dispatch-render--derived-layout))
          (lines (agent-shell-dispatch-render--node-wrap-lines (plist-get task :name) node-w))
          (base-h (plist-get L :node-h)))
     (if (> (length lines) 1)
-        (+ base-h (* (1- (length lines)) (+ (plist-get L :node-font-size) 2)))
+        (+ base-h (* (1- (length lines)) (agent-shell-dispatch-render--line-height (plist-get L :node-font-size))))
       base-h)))
 
 (defun agent-shell-dispatch-render--compute-col-widths (columns max-level &optional stack-map)
   "Compute per-column widths from COLUMNS hash.
 MAX-LEVEL is the highest level index.
 When STACK-MAP is non-nil, paired levels share width."
-  (let* ((L agent-shell-dispatch-render--layout)
+  (let* ((L (agent-shell-dispatch-render--derived-layout))
          (theme (agent-shell-dispatch-render--theme-colors))
          (font (agent-shell-dispatch-render-theme-font theme))
          (font-size (plist-get L :node-font-size))
@@ -337,10 +398,12 @@ When STACK-MAP is non-nil, paired levels share width."
                                                    maximize (cl-loop for line in lines
                                                                      maximize (agent-shell-dispatch-render--text-pixel-width
                                                                                line font font-size)))))
+                       (right-pad (round (/ (float (plist-get L :node-icon-w))
+                                            (agent-shell-dispatch-render-theme-svg-text-correction theme))))
                        (w (min (+ (plist-get L :node-pad-x)
                                   (plist-get L :node-icon-w)
                                   max-text-px
-                                  8) ;; right pad balances icon weight
+                                  right-pad)
                                (plist-get L :node-max-w))))
                   (puthash lv w widths)
                   (when (and stack-info (eq (agent-shell-dispatch-render-stack-info-position stack-info) 'top))
@@ -352,14 +415,14 @@ When STACK-MAP is non-nil, paired levels share width."
 COL-WIDTHS provides per-level widths.
 When STACK-MAP is non-nil, paired levels share x-position."
   (let ((positions (make-hash-table))
-        (x (plist-get agent-shell-dispatch-render--layout :margin)))
+        (x (plist-get (agent-shell-dispatch-render--derived-layout) :margin)))
     (cl-loop for lv from 0 to max-level
              for stack-info = (and stack-map (gethash lv stack-map))
              do (if (and stack-info (eq (agent-shell-dispatch-render-stack-info-position stack-info) 'bottom))
                     (puthash lv (gethash (agent-shell-dispatch-render-stack-info-peer-level stack-info) positions) positions)
                   (puthash lv x positions)
                   (cl-incf x (+ (gethash lv col-widths)
-                                (plist-get agent-shell-dispatch-render--layout :col-gap)))))
+                                (plist-get (agent-shell-dispatch-render--derived-layout) :col-gap)))))
     positions))
 
 (defun agent-shell-dispatch-render--compute-task-heights (leveled col-widths)
@@ -383,7 +446,7 @@ When STACK-MAP is non-nil, paired levels share x-position."
   "Draw a curved arrow from (X1,Y1) to (X2,Y2) on SVG with arrowhead.
 If BYPASS-Y is non-nil, route the arrow through that Y coordinate
 to avoid crossing intermediate boxes."
-  (let* ((L agent-shell-dispatch-render--layout)
+  (let* ((L (agent-shell-dispatch-render--derived-layout))
          (head-len (plist-get L :arrow-head-len))
          (hw (plist-get L :arrow-head-hw))
          (ex (- (float x2) head-len)) (ey (float y2))
@@ -429,17 +492,18 @@ to avoid crossing intermediate boxes."
 TOP-EDGES is the top node's connection points.
 BOT-X, BOT-Y, BOT-W define the bottom node's position.
 COLOR is the arrow stroke color."
-  (let* ((L agent-shell-dispatch-render--layout)
+  (let* ((L (agent-shell-dispatch-render--derived-layout))
          (x1 (agent-shell-dispatch-render-node-edges-right-x top-edges))
          (y1 (agent-shell-dispatch-render-node-edges-cy top-edges))
          (x2 (+ bot-x (/ bot-w 2)))
          (y2 (float bot-y))
-         (ey (+ y2 5))
+         (head-len (plist-get L :arrow-head-len))
+         (ey (+ y2 head-len))
          (overshoot (plist-get L :stack-arrow-overshoot))
          (cp1-x (+ x1 overshoot))
          (cp1-y (float bot-y))
          (cp2-x (float x2))
-         (cp2-y (- y2 20.0))
+         (cp2-y (- y2 (* (plist-get L :stack-vgap) 0.67)))
          (hw (plist-get L :arrow-head-hw))
          (sw (plist-get L :arrow-stroke-w)))
     ;; Path
@@ -460,38 +524,24 @@ COLOR is the arrow stroke color."
                                                      (+ x2 hw) (- y2 (plist-get L :arrow-head-len))))
                                   (fill . ,color))))))
 
-(defun agent-shell-dispatch-render--draw-pill (svg x cy w h icon theme)
-  "Draw a pill-shaped start/end node on SVG at X, centered at CY.
-W and H are dimensions, ICON is the label, THEME provides colors.
-Returns connection edge positions."
-  (let ((L agent-shell-dispatch-render--layout))
-    (svg-rectangle svg x (- cy (/ h 2)) w h
-                   :fill (agent-shell-dispatch-render-theme-pill-bg theme)
-                   :rx (plist-get L :pill-rx))
-    (svg-text svg icon :x (+ x (/ w 2)) :y (+ cy (plist-get L :pill-text-y-offset))
-              :fill (agent-shell-dispatch-render-theme-dim theme)
-              :font-size (plist-get L :pill-font-size)
-              :font-family (agent-shell-dispatch-render-theme-font theme) :text-anchor "middle")
-    (let ((rx (plist-get L :pill-rx)))
-      (agent-shell-dispatch-render-node-edges-make :left-x (+ x rx) :right-x (- (+ x w) rx) :cy cy))))
 
 (defun agent-shell-dispatch-render--draw-task-node (svg x y w h task theme)
   "Draw a task node on SVG. W x H is the pre-computed size @ (X, Y).
 Returns edge positions."
-  (let* ((L agent-shell-dispatch-render--layout)
+  (let* ((L (agent-shell-dispatch-render--derived-layout))
          (sc (cdr (assq (plist-get task :status) (agent-shell-dispatch-render-theme-status theme))))
          (font (agent-shell-dispatch-render-theme-font theme))
          (pad (plist-get L :node-pad-x))
          (lines (agent-shell-dispatch-render--node-wrap-lines (plist-get task :name) w))
          (font-size (plist-get L :node-font-size))
-         (line-h (+ font-size 2))
+         (line-h (agent-shell-dispatch-render--line-height font-size))
          (text-x (+ x pad (plist-get L :node-icon-w)))
          (text-y (+ y (plist-get L :node-text-y)))
          (cy (+ y (/ h 2))))
     (svg-rectangle svg x y w h :fill (agent-shell-dispatch-render-status-style-bg sc)
                    :rx (plist-get L :node-rx))
     ;; Icon — vertically centered
-    (svg-text svg (agent-shell-dispatch-render-status-style-icon sc) :x (+ x pad) :y (+ cy 4)
+    (svg-text svg (agent-shell-dispatch-render-status-style-icon sc) :x (+ x pad) :y (+ cy (agent-shell-dispatch-render--baseline-offset font-size))
               :fill (agent-shell-dispatch-render-status-style-fg sc)
               :font-size font-size :font-family font)
     ;; Text lines
@@ -506,22 +556,43 @@ Returns edge positions."
 
 ;; ── Agent activity column ────────────────────────────────────────────
 
+(defun agent-shell-dispatch-render--baseline-offset (svg-font-size)
+  "Compute baseline-to-center offset for vertically centering text at SVG-FONT-SIZE.
+Positive value: baseline is below center."
+  (let* ((theme (agent-shell-dispatch-render--theme-colors))
+         (ar (agent-shell-dispatch-render-theme-ascent-ratio theme))
+         (dr (agent-shell-dispatch-render-theme-descent-ratio theme)))
+    (round (* svg-font-size (/ (- ar dr) 2.0)))))
+
+(defun agent-shell-dispatch-render--line-height (svg-font-size)
+  "Compute line height for text at SVG-FONT-SIZE."
+  (let* ((theme (agent-shell-dispatch-render--theme-colors))
+         (ar (agent-shell-dispatch-render-theme-ascent-ratio theme))
+         (dr (agent-shell-dispatch-render-theme-descent-ratio theme)))
+    (round (* svg-font-size (+ ar dr)))))
+
 (defun agent-shell-dispatch-render--text-pixel-width (text font-family svg-font-size)
   "Measure pixel width of TEXT as it would render in SVG.
-SVG-FONT-SIZE is in px; convert to Emacs face height (1/10 pt)."
-  (let* ((height (round (* svg-font-size 7.5))) ;; px → 1/10 pt (96dpi: 1px ≈ 0.75pt)
+Calibrated against actual librsvg rendering via the theme's correction factor."
+  (let* ((theme (agent-shell-dispatch-render--theme-colors))
+         (px-per-pt (agent-shell-dispatch-render-theme-px-per-pt theme))
+         (correction (agent-shell-dispatch-render-theme-svg-text-correction theme))
+         (height (round (/ (* svg-font-size 10.0) px-per-pt)))
          (sample (propertize text 'face
                              `(:family ,font-family :height ,height))))
-    (string-pixel-width sample)))
+    (round (* (string-pixel-width sample) correction))))
 
 (defun agent-shell-dispatch-render--agent-layout (agents h theme)
   "Compute per-column layout for agent activity display.
 Returns a plist (:total-w WIDTH :columns COLS :per-col N :sorted LIST).
 Each entry in COLS is (:x X :w W :agents LIST-OF-INFO)."
-  (let* ((font (agent-shell-dispatch-render-theme-font theme))
-         (font-size (- (plist-get agent-shell-dispatch-render--layout :node-font-size) 2))
-         (pad-x 2) (row-h 16) (col-gap 4)
-         (avail-h (- h 6))
+  (let* ((L (agent-shell-dispatch-render--derived-layout))
+         (font (agent-shell-dispatch-render-theme-font theme))
+         (font-size (plist-get L :node-font-size))
+         (pad-x (plist-get L :agent-pad-x))
+         (row-h (plist-get L :agent-row-h))
+         (col-gap (plist-get L :agent-col-gap))
+         (avail-h (- h (plist-get L :agent-margin)))
          (sorted (let (entries)
                    (maphash (lambda (_buf info) (push info entries)) agents)
                    (sort entries (lambda (a b)
@@ -552,10 +623,13 @@ Each entry in COLS is (:x X :w W :agents LIST-OF-INFO)."
 (defun agent-shell-dispatch-render--draw-agent-column (svg agents x h theme)
   "Draw agent activity indicators as labeled boxes on SVG at X.
 Filled box = busy, hollow box = idle. Per-column width fits tightest name."
-  (let* ((L agent-shell-dispatch-render--layout)
+  (let* ((L (agent-shell-dispatch-render--derived-layout))
          (font (agent-shell-dispatch-render-theme-font theme))
          (font-size (plist-get L :node-font-size))
-         (pad-x 2) (row-h 16) (box-h 14) (rx 3)
+         (pad-x (plist-get L :agent-pad-x))
+         (row-h (plist-get L :agent-row-h))
+         (box-h (plist-get L :agent-box-h))
+         (rx (plist-get L :agent-box-rx))
          (ok (or (face-foreground 'success nil t) "#b6e63e"))
          (dim (agent-shell-dispatch-render-theme-dim theme))
          (bg (agent-shell-dispatch-render-theme-bg theme))
@@ -573,7 +647,7 @@ Filled box = busy, hollow box = idle. Per-column width fits tightest name."
                  for name = (agent-shell-dispatch-agent-info-name info)
                  for busy = (agent-shell-dispatch-agent-info-busy info)
                  for by = (+ start-y (* row row-h) (/ (- row-h box-h) 2))
-                 for text-y = (+ by box-h -3)
+                 for text-y = (+ by (/ box-h 2) (agent-shell-dispatch-render--baseline-offset font-size))
                  do (if busy
                         (svg-rectangle svg col-x by col-w box-h
                                        :fill busy-bg :stroke ok :stroke-width "1" :rx rx)
@@ -582,7 +656,7 @@ Filled box = busy, hollow box = idle. Per-column width fits tightest name."
                  (svg-text svg name
                            :x (+ col-x pad-x) :y text-y
                            :fill (if busy ok dim)
-                           :font-size (- font-size 2) :font-family font))))))
+                           :font-size font-size :font-family font))))))
 
 ;; ── Edge routing ────────────────────────────────────────────────────
 
@@ -638,7 +712,8 @@ When STACK-MAP is non-nil, also avoids stacked pair bounds at the destination."
                           min-top (min min-top (agent-shell-dispatch-render-col-extent-top bounds))
                           max-bot (max max-bot (agent-shell-dispatch-render-col-extent-bot bounds))))
         (when has-intermediate
-          (let ((pad (+ (plist-get agent-shell-dispatch-render--layout :node-pad) 6)))
+          (let ((pad (+ (plist-get (agent-shell-dispatch-render--derived-layout) :node-pad)
+                        (plist-get (agent-shell-dispatch-render--derived-layout) :arrow-head-len) 1)))
             (if (< from-cy (/ h 2))
                 (- min-top pad)
               (+ max-bot pad))))))))
@@ -698,7 +773,7 @@ TASK-HEIGHTS, and LAYOUT constants."
   "Compute topology, geometry, and node positions.
 TASK-DEFS is a list of `agent-shell-dispatch-render-task' structs.
 Returns a `agent-shell-dispatch-render-ctx' for `agent-shell-dispatch-render-draw'."
-  (let* ((L agent-shell-dispatch-render--layout)
+  (let* ((L (agent-shell-dispatch-render--derived-layout))
          (theme (agent-shell-dispatch-render--theme-colors))
          (node-pad (plist-get L :node-pad))
          (col-gap (plist-get L :col-gap))
@@ -855,7 +930,7 @@ Returns a `agent-shell-dispatch-render-ctx' for `agent-shell-dispatch-render-dra
 CTX is a agent-shell-dispatch-render-ctx from `agent-shell-dispatch-render-prepare'.
 STATUS-MAP is a hash of task-id -> agent-shell-dispatch-render-task-status.
 AGENTS is a hash of buffer-name -> agent-shell-dispatch-agent-info."
-  (let* ((L agent-shell-dispatch-render--layout)
+  (let* ((L (agent-shell-dispatch-render--derived-layout))
          (theme (agent-shell-dispatch-render--theme-colors))
          (topo (agent-shell-dispatch-render-ctx-topo ctx))
          (canvas (agent-shell-dispatch-render-ctx-canvas ctx))
@@ -945,7 +1020,7 @@ DISPATCHER-BUF is the buffer name."
                              0))
            (show-level (max 0 (1- target-level)))
            (view-x (max 0 (- (gethash show-level col-xs)
-                             (plist-get agent-shell-dispatch-render--layout :margin)))))
+                             (plist-get (agent-shell-dispatch-render--derived-layout) :margin)))))
       (setq svg-str (replace-regexp-in-string
                      (format "width=\"%d\" height=\"%d\"" svg-w svg-h)
                      (format "width=\"%d\" height=\"%d\" viewBox=\"%d 0 %d %d\""
