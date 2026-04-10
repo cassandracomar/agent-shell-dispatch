@@ -1,6 +1,6 @@
 # agent-shell-dispatch
 
-Multi-agent dispatch and coordination for [agent-shell](https://github.com/nicholasrq/agent-shell). Spawn parallel AI agents from Emacs, coordinate their work, and visualize progress with a live SVG task graph rendered in the agent-shell header.
+Multi-agent dispatch and coordination for [agent-shell](https://github.com/xenodium/agent-shell). Spawn parallel AI agents from Emacs, coordinate their work, and visualize progress with a live SVG task graph rendered in the agent-shell header.
 
 <img src="https://raw.githubusercontent.com/cassandracomar/agent-shell-dispatch/refs/heads/main/docs/example-header.png?sanitize=true" alt="Task graph screenshot">
 
@@ -54,7 +54,7 @@ Clone this repository and add it to your `load-path`:
 ## Requirements
 
 - Emacs 29+ (for SVG support and `text-property-search-forward`)
-- [agent-shell](https://github.com/nicholasrq/agent-shell)
+- [agent-shell](https://github.com/xenodium/agent-shell)
 
 ## Usage
 
@@ -155,4 +155,4 @@ All dispatch and render state is buffer-local, so multiple independent dispatch 
 
 ## License
 
-See [agent-shell](https://github.com/nicholasrq/agent-shell) for license terms.
+See [agent-shell](https://github.com/xenodium/agent-shell) for license terms.
