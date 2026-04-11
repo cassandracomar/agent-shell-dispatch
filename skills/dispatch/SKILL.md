@@ -38,7 +38,8 @@ Code blocks below show the elisp to evaluate. Wrap them with whichever method yo
 First, register your buffer as the dispatcher so permission requests render here:
 
 ```elisp
-(setq agent-shell-dispatch--primary-buffer (buffer-name))
+(setq agent-shell-dispatch--primary-buffer
+      (buffer-name (window-buffer (selected-window))))
 ```
 
 Then spawn agents. They run in the background (no popup, no prompts, acceptEdits mode). Non-edit permissions (bash, etc.) render as button dialogs in YOUR buffer — the user handles them directly. You do NOT handle permissions.
