@@ -38,7 +38,14 @@ Code blocks below show the elisp to evaluate. Wrap them with whichever method yo
 First, register your buffer as the dispatcher so permission requests render here:
 
 ```elisp
-(setq agent-shell-dispatch--primary-buffer (buffer-name))
+(setq agent-shell-dispatch--primary-buffer
+      (or (cl-loop for win in (window-list)
+                   for buf = (window-buffer win)
+                   when (and (with-current-buffer buf
+                               (derived-mode-p 'agent-shell-mode))
+                             (not (string-prefix-p "[agent:" (buffer-name buf))))
+                   return (buffer-name buf))
+          (buffer-name (window-buffer (selected-window)))))
 ```
 
 Then spawn agents. They run in the background (no popup, no prompts, acceptEdits mode). Non-edit permissions (bash, etc.) render as button dialogs in YOUR buffer — the user handles them directly. You do NOT handle permissions.
@@ -52,11 +59,22 @@ Then spawn agents. They run in the background (no popup, no prompts, acceptEdits
  "You are Impl-1. Wait for your task assignment.")
 ```
 
-Repeat for each agent.
+Repeat for each agent. Agents spawned before `start` are automatically registered when `start` runs.
 
-## Step 3: Assign Tasks and Start Task Graph
+## Step 3: Start Task Graph and Assign Tasks
 
-Send each agent its task using the subagent template. Read `SUBAGENT_TEMPLATE.md` (in the same directory as this skill) and customize it per task — replace TASK_NAME, TASK_ID, TASK_DESCRIPTION, and CRITERIA with the actual values.
+Start the task graph renderer **after spawning agents**. It enables `agent-shell-dispatch-render-mode` in the dispatcher buffer, rendering a live SVG dependency graph in the header. Pass a list of task plists:
+
+```elisp
+(agent-shell-dispatch-start
+ (buffer-name)
+ '((:id "impl-1" :name "Task 1 description" :agent "TBD")
+   (:id "impl-2" :name "Task 2 description" :agent "TBD")))
+```
+
+The header graph updates at ~100ms with spinners and status colors. Geometry is cached; only status colors redraw per frame. You do NOT need to poll or check statuses.
+
+Then send each agent its task using the subagent template. Read `SUBAGENT_TEMPLATE.md` (in the same directory as this skill) and customize it per task — replace TASK_NAME, TASK_ID, TASK_DESCRIPTION, and CRITERIA with the actual values.
 
 Use `agent-shell-dispatch-agent-buffer` to resolve the short agent name to its full buffer name:
 
@@ -71,17 +89,6 @@ Use `agent-shell-dispatch-agent-buffer` to resolve the short agent name to its f
 ```elisp
 (agent-shell-dispatch-report "TASK-ID" "working")
 ```
-
-After sending ALL tasks, start the task graph renderer. It enables `agent-shell-dispatch-render-mode` in the dispatcher buffer, rendering a live SVG dependency graph in the header. Pass a list of task plists:
-
-```elisp
-(agent-shell-dispatch-start
- (buffer-name)
- '((:id "impl-1" :name "Task 1 description" :agent "Claude Agent @ doom-config<N>")
-   (:id "impl-2" :name "Task 2 description" :agent "Claude Agent @ doom-config<M>")))
-```
-
-The header graph updates at ~100ms with spinners and status colors. Geometry is cached; only status colors redraw per frame. You do NOT need to poll or check statuses.
 
 ## Step 4: Wait for User
 

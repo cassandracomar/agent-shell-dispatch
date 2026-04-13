@@ -1096,14 +1096,16 @@ Global — only one advice installation is needed.")
 (defun agent-shell-dispatch-render--extend-header (&rest _)
   "Build task graph SVG and append below the host header SVG.
 Buffer-local render vars ensure this is a no-op in non-dispatcher buffers."
-  (when-let* ((ctx agent-shell-dispatch-render--ctx)
-              (status-fn agent-shell-dispatch-render-status-function)
-              (status-map (funcall status-fn))
+  (when-let* (((bound-and-true-p agent-shell-dispatch-render-mode))
+              (ctx agent-shell-dispatch-render--ctx)
               ((stringp header-line-format))
               (disp (get-text-property 1 'display header-line-format))
               (orig-svg (plist-get (cdr disp) :data)))
     (agent-shell-dispatch-render-cycle-spinner)
-    (let* ((agents (when agent-shell-dispatch-render-agent-activity-function
+    (let* ((status-fn agent-shell-dispatch-render-status-function)
+           (status-map (or (and status-fn (funcall status-fn))
+                           (make-hash-table :test 'equal)))
+           (agents (when agent-shell-dispatch-render-agent-activity-function
                      (funcall agent-shell-dispatch-render-agent-activity-function)))
            (svg (agent-shell-dispatch-render-draw ctx status-map agents))
            (graph-svg (with-temp-buffer (svg-print svg) (buffer-string)))
@@ -1133,21 +1135,30 @@ Manages the per-buffer heartbeat timer that drives header updates.
 Requires `agent-shell-dispatch-render-global-mode' for the advice."
   :lighter " Dispatch"
   (if agent-shell-dispatch-render-mode
-      (if (null agent-shell-dispatch-render--ctx)
-          (setq agent-shell-dispatch-render-mode nil)
-        ;; Auto-enable global mode if not already on
-        (unless (bound-and-true-p agent-shell-dispatch-global-mode)
-          (agent-shell-dispatch-global-mode 1))
-        ;; Buffer-local heartbeat timer
-        (let ((buf (current-buffer)))
-          (setq agent-shell-dispatch-render--heartbeat-timer
-                (run-with-timer 0.1 0.1
-                                (lambda () (agent-shell-dispatch-render--heartbeat buf))))))
+      (progn
+        ;; Rebuild ctx from task-defs if needed (e.g. after mode was toggled off)
+        (when (and (null agent-shell-dispatch-render--ctx)
+                   agent-shell-dispatch-render--task-defs)
+          (setq agent-shell-dispatch-render--ctx
+                (agent-shell-dispatch-render-prepare
+                 agent-shell-dispatch-render--task-defs)))
+        (if (null agent-shell-dispatch-render--ctx)
+            (progn
+              (setq agent-shell-dispatch-render-mode nil)
+              (message "No task graph to display"))
+          ;; Auto-enable global mode if not already on
+          (unless (bound-and-true-p agent-shell-dispatch-global-mode)
+            (agent-shell-dispatch-global-mode 1))
+          ;; Buffer-local heartbeat timer
+          (let ((buf (current-buffer)))
+            (setq agent-shell-dispatch-render--heartbeat-timer
+                  (run-with-timer 0.1 0.1
+                                  (lambda () (agent-shell-dispatch-render--heartbeat buf)))))))
     (when (timerp agent-shell-dispatch-render--heartbeat-timer)
       (cancel-timer agent-shell-dispatch-render--heartbeat-timer)
       (setq agent-shell-dispatch-render--heartbeat-timer nil))
-    ;; Clear ctx BEFORE reset so the advice doesn't re-render during header update
-    (setq agent-shell-dispatch-render--ctx nil)
+    ;; Reset header to remove the graph, but preserve ctx so the
+    ;; mode can be re-enabled without a full teardown.
     (when agent-shell-dispatch-render-reset-function
       (ignore-errors (funcall agent-shell-dispatch-render-reset-function)))))
 
