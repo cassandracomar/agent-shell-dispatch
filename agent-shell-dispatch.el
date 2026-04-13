@@ -241,7 +241,8 @@ DISPATCHER-BUFFER is the dispatcher's `agent-shell' buffer name.
 TASKS is a list of plists: ((:id ID :name NAME :agent AGENT-BUF) ...)."
   (agent-shell-dispatch-render-teardown)
   (setq agent-shell-dispatch-msg--pending-permission-agents nil
-        agent-shell-dispatch-msg--pending-input-agents nil)
+        agent-shell-dispatch-msg--pending-input-agents nil
+        agent-shell-dispatch--primary-buffer dispatcher-buffer)
   ;; Normalize :agent — default to dispatcher buffer if missing or not a string
   (let* ((normalized (mapcar (lambda (task)
                                (let ((agent (plist-get task :agent)))
@@ -265,24 +266,27 @@ TASKS is a list of plists: ((:id ID :name NAME :agent AGENT-BUF) ...)."
     ;; Auto-enable global mode if not already on
     (unless agent-shell-dispatch-global-mode
       (agent-shell-dispatch-global-mode 1))
-    ;; Set up render module
-    (add-hook 'agent-shell-dispatch-render-teardown-hook
-              #'agent-shell-dispatch--clear-state)
-    (agent-shell-dispatch-render-set-tasks task-defs)
-    (setq agent-shell-dispatch-render-buffer dispatcher-buffer
-          agent-shell-dispatch-render-status-function #'agent-shell-dispatch--build-status-map
-          agent-shell-dispatch-render-agent-activity-function #'agent-shell-dispatch--get-agents
-          agent-shell-dispatch-render-header-function #'agent-shell--update-header-and-mode-line
-          agent-shell-dispatch-render-reset-function (lambda ()
-                                                       (when (boundp 'agent-shell--header-cache)
-                                                         (setq agent-shell--header-cache nil))
-                                                       (agent-shell--update-header-and-mode-line))
-          agent-shell-dispatch-render-busy-p-function (lambda () shell-maker--busy)
-          agent-shell-dispatch-render-advice-target 'agent-shell--update-header-and-mode-line)
-    ;; Enable render mode in dispatcher buffer
-    (with-current-buffer (get-buffer dispatcher-buffer)
-      (unless agent-shell-dispatch-render-mode
-        (agent-shell-dispatch-render-mode 'toggle)))))
+    ;; Set up render module in the dispatcher buffer so all
+    ;; buffer-local render state lives in the right place.
+    (let ((state agent-shell-dispatch--state))
+      (with-current-buffer (get-buffer dispatcher-buffer)
+        (setq agent-shell-dispatch--state state)
+        (add-hook 'agent-shell-dispatch-render-teardown-hook
+                  #'agent-shell-dispatch--clear-state nil t)
+        (agent-shell-dispatch-render-set-tasks task-defs)
+        (setq agent-shell-dispatch-render-buffer dispatcher-buffer
+              agent-shell-dispatch-render-status-function #'agent-shell-dispatch--build-status-map
+              agent-shell-dispatch-render-agent-activity-function #'agent-shell-dispatch--get-agents
+              agent-shell-dispatch-render-header-function #'agent-shell--update-header-and-mode-line
+              agent-shell-dispatch-render-reset-function (lambda ()
+                                                           (when (boundp 'agent-shell--header-cache)
+                                                             (setq agent-shell--header-cache nil))
+                                                           (agent-shell--update-header-and-mode-line))
+              agent-shell-dispatch-render-busy-p-function (lambda () shell-maker--busy)
+              agent-shell-dispatch-render-advice-target 'agent-shell--update-header-and-mode-line)
+        ;; Enable render mode
+        (unless agent-shell-dispatch-render-mode
+          (agent-shell-dispatch-render-mode 'toggle))))))
 
 
 (defun agent-shell-dispatch-stop ()
