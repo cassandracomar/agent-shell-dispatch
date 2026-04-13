@@ -1143,7 +1143,9 @@ Requires `agent-shell-dispatch-render-global-mode' for the advice."
                 (agent-shell-dispatch-render-prepare
                  agent-shell-dispatch-render--task-defs)))
         (if (null agent-shell-dispatch-render--ctx)
-            (setq agent-shell-dispatch-render-mode nil)
+            (progn
+              (setq agent-shell-dispatch-render-mode nil)
+              (message "No task graph to display"))
           ;; Auto-enable global mode if not already on
           (unless (bound-and-true-p agent-shell-dispatch-global-mode)
             (agent-shell-dispatch-global-mode 1))
