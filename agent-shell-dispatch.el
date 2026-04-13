@@ -144,6 +144,31 @@ Called each render frame from the dispatcher buffer."
   (when-let* ((state agent-shell-dispatch--state))
     (agent-shell-dispatch-state-agents state)))
 
+(defun agent-shell-dispatch-find-my-buffer (&optional dir)
+  "Find the agent-shell buffer for DIR (default: `default-directory').
+Match by directory, prefer busy buffers, exclude [agent:] subagents.
+Intended for agents calling via emacsclient where (buffer-name)
+returns *server* — pass the agent's $PWD from bash."
+  (let ((target (file-name-as-directory
+                 (expand-file-name (or dir default-directory)))))
+    (or (cl-loop for buf in (buffer-list)
+                 when (and (with-current-buffer buf
+                             (and (derived-mode-p 'agent-shell-mode)
+                                  shell-maker--busy
+                                  (equal (file-name-as-directory
+                                          (expand-file-name default-directory))
+                                         target)))
+                           (not (string-prefix-p "[agent:" (buffer-name buf))))
+                 return (buffer-name buf))
+        (cl-loop for buf in (buffer-list)
+                 when (and (with-current-buffer buf
+                             (and (derived-mode-p 'agent-shell-mode)
+                                  (equal (file-name-as-directory
+                                          (expand-file-name default-directory))
+                                         target)))
+                           (not (string-prefix-p "[agent:" (buffer-name buf))))
+                 return (buffer-name buf)))))
+
 (defun agent-shell-dispatch-agent-buffer (name)
   "Look up the full buffer name for agent with display NAME.
 Merges any pending agents first.

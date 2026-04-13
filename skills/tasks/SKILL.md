@@ -35,15 +35,19 @@ Break the work into discrete steps. Identify dependencies between them — which
 
 Each task is a plist with `:id`, `:name`, `:agent` (your buffer name), and optionally `:depends-on` (list of task IDs that must complete first):
 
+**Important:** Pass `$PWD` from bash so Emacs finds the correct buffer — `(buffer-name)` returns `*server*` via emacsclient:
+
 ```elisp
 (agent-shell-dispatch-start
- (buffer-name)
+ (agent-shell-dispatch-find-my-buffer "PWD_PLACEHOLDER")
  '((:id "step-1" :name "Read codebase")
    (:id "step-2" :name "Write tests" :depends-on ("step-1"))
    (:id "step-3" :name "Implement feature" :depends-on ("step-1"))
    (:id "step-4" :name "Run tests" :depends-on ("step-2" "step-3"))
    (:id "step-5" :name "Commit" :depends-on ("step-4"))))
 ```
+
+When evaluating via emacsclient, substitute `PWD_PLACEHOLDER` with the actual working directory from bash (e.g. using `"'"$(pwd)"'"`  shell interpolation).
 
 The `:agent` field is optional for single-agent work — it defaults to the dispatcher buffer. The graph renders horizontally by dependency level with curved arrows between them.
 

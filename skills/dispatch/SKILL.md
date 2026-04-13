@@ -37,15 +37,10 @@ Code blocks below show the elisp to evaluate. Wrap them with whichever method yo
 
 First, register your buffer as the dispatcher so permission requests render here:
 
-```elisp
-(setq agent-shell-dispatch--primary-buffer
-      (or (cl-loop for win in (window-list)
-                   for buf = (window-buffer win)
-                   when (and (with-current-buffer buf
-                               (derived-mode-p 'agent-shell-mode))
-                             (not (string-prefix-p "[agent:" (buffer-name buf))))
-                   return (buffer-name buf))
-          (buffer-name (window-buffer (selected-window)))))
+The agent passes `$PWD` from bash so Emacs can match the correct buffer:
+
+```bash
+emacsclient --eval "(setq agent-shell-dispatch--primary-buffer (agent-shell-dispatch-find-my-buffer \"$(pwd)\"))"
 ```
 
 Then spawn agents. They run in the background (no popup, no prompts, acceptEdits mode). Non-edit permissions (bash, etc.) render as button dialogs in YOUR buffer — the user handles them directly. You do NOT handle permissions.
