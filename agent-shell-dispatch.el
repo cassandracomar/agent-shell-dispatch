@@ -50,7 +50,19 @@
 
 (defvar agent-shell-dispatch--pending-agents nil
   "Agents spawned before `agent-shell-dispatch-start'.
-List of (NAME . agent-info) entries merged into state by `start'.")
+List of (NAME . agent-info) entries merged into state by `start'
+or lazily by `agent-shell-dispatch-agent-buffer'.")
+
+(defun agent-shell-dispatch--merge-pending-agents ()
+  "Merge pending agents into current state's agents hash.
+No-op if state or pending list is empty."
+  (when (and agent-shell-dispatch--state
+             agent-shell-dispatch--pending-agents)
+    (let ((agents (agent-shell-dispatch-state-agents
+                   agent-shell-dispatch--state)))
+      (dolist (entry agent-shell-dispatch--pending-agents)
+        (puthash (car entry) (cdr entry) agents)))
+    (setq agent-shell-dispatch--pending-agents nil)))
 
 (defun agent-shell-dispatch-forward-permission (permission)
   "Forward PERMISSION from a background agent via the messaging protocol."
@@ -134,7 +146,9 @@ Called each render frame from the dispatcher buffer."
 
 (defun agent-shell-dispatch-agent-buffer (name)
   "Look up the full buffer name for agent with display NAME.
+Merges any pending agents first.
 Returns the buffer name string, or nil if not found."
+  (agent-shell-dispatch--merge-pending-agents)
   (when-let* ((state agent-shell-dispatch--state)
               (agents (agent-shell-dispatch-state-agents state))
               (info (gethash name agents)))
@@ -247,12 +261,7 @@ TASKS is a list of plists: ((:id ID :name NAME :agent AGENT-BUF) ...)."
            :statuses (make-hash-table :test 'equal)
            :agents (make-hash-table :test 'equal)))
     ;; Merge agents spawned before start was called
-    (when agent-shell-dispatch--pending-agents
-      (let ((agents (agent-shell-dispatch-state-agents
-                     agent-shell-dispatch--state)))
-        (dolist (entry agent-shell-dispatch--pending-agents)
-          (puthash (car entry) (cdr entry) agents)))
-      (setq agent-shell-dispatch--pending-agents nil))
+    (agent-shell-dispatch--merge-pending-agents)
     ;; Auto-enable global mode if not already on
     (unless agent-shell-dispatch-global-mode
       (agent-shell-dispatch-global-mode 1))
@@ -385,17 +394,17 @@ Returns the buffer name."
                          (agent-shell--process-pending-request))))
                    buf initial-message))
     (when (buffer-live-p buf)
-      ;; Register in dispatcher's agent set (keyed by display name).
-      ;; If state doesn't exist yet (spawn called before start),
-      ;; stash in pending list for start to merge.
-      (let ((info (agent-shell-dispatch-agent-info-make
+      ;; Always push to the pending list.  If state already exists
+      ;; (start was called), merge immediately; otherwise start or
+      ;; agent-buffer will merge later.  This avoids registering
+      ;; into stale state from a previous dispatch session.
+      (push (cons name
+                  (agent-shell-dispatch-agent-info-make
                    :buffer (buffer-name buf)
                    :name name
-                   :busy nil)))
-        (if-let* ((state agent-shell-dispatch--state)
-                   (agents (agent-shell-dispatch-state-agents state)))
-            (puthash name info agents)
-          (push (cons name info) agent-shell-dispatch--pending-agents)))
+                   :busy nil))
+            agent-shell-dispatch--pending-agents)
+      (agent-shell-dispatch--merge-pending-agents)
       (buffer-name buf))))
 
 (defun agent-shell-dispatch-list-agents ()

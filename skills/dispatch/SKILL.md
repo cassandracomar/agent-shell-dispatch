@@ -39,7 +39,13 @@ First, register your buffer as the dispatcher so permission requests render here
 
 ```elisp
 (setq agent-shell-dispatch--primary-buffer
-      (buffer-name (window-buffer (selected-window))))
+      (or (cl-loop for win in (window-list)
+                   for buf = (window-buffer win)
+                   when (and (with-current-buffer buf
+                               (derived-mode-p 'agent-shell-mode))
+                             (not (string-prefix-p "[agent:" (buffer-name buf))))
+                   return (buffer-name buf))
+          (buffer-name (window-buffer (selected-window)))))
 ```
 
 Then spawn agents. They run in the background (no popup, no prompts, acceptEdits mode). Non-edit permissions (bash, etc.) render as button dialogs in YOUR buffer — the user handles them directly. You do NOT handle permissions.
