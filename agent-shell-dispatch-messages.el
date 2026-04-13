@@ -457,7 +457,8 @@ Permission render returns text with embedded keymap that must be preserved."
 (cl-defmethod agent-shell-dispatch-msg-handle
   ((msg agent-shell-dispatch-msg-task-completed) target-buf)
   "Notify the dispatcher that a subagent has completed its task.
-Queues a prompt so the dispatcher can review and mark the task done."
+Queues a prompt so the dispatcher can review and mark the task done.
+If the dispatcher is busy, the drain-queue mechanism processes it later."
   (let ((agent (agent-shell-dispatch-msg-agent-buffer msg))
         (task-id (agent-shell-dispatch-msg-task-completed-task-id msg))
         (summary (agent-shell-dispatch-msg-task-completed-summary msg)))
@@ -465,12 +466,14 @@ Queues a prompt so the dispatcher can review and mark the task done."
       (with-current-buffer buf
         (agent-shell--enqueue-request
          :prompt (format "[Task Complete: %s (task: %s)]\n\n%s" agent task-id summary))
-        (agent-shell--process-pending-request)))))
+        (unless shell-maker--busy
+          (agent-shell--process-pending-request))))))
 
 (cl-defmethod agent-shell-dispatch-msg-handle
   ((msg agent-shell-dispatch-msg-error) target-buf)
   "Notify the dispatcher of a subagent error.
-Queues a prompt so the dispatcher can update the task graph."
+Queues a prompt so the dispatcher can update the task graph.
+If the dispatcher is busy, the drain-queue mechanism processes it later."
   (let ((agent (agent-shell-dispatch-msg-agent-buffer msg))
         (task-id (agent-shell-dispatch-msg-error-task-id msg))
         (desc (agent-shell-dispatch-msg-error-description msg))
@@ -481,12 +484,14 @@ Queues a prompt so the dispatcher can update the task graph."
          :prompt (format "[Task Error: %s (task: %s)]\n\n%s%s"
                          agent task-id desc
                          (if ctx (format "\n\nContext: %s" ctx) "")))
-        (agent-shell--process-pending-request)))))
+        (unless shell-maker--busy
+          (agent-shell--process-pending-request))))))
 
 (cl-defmethod agent-shell-dispatch-msg-handle
   ((msg agent-shell-dispatch-msg-input-needed) target-buf)
   "Queue MSG question to the dispatcher agent in TARGET-BUF.
-Also tracks the agent as waiting for input."
+Also tracks the agent as waiting for input.
+If the dispatcher is busy, the drain-queue mechanism processes it later."
   (let ((agent (agent-shell-dispatch-msg-agent-buffer msg)))
     (cl-pushnew agent agent-shell-dispatch-msg--pending-input-agents
                 :test #'equal)
@@ -499,7 +504,8 @@ Also tracks the agent as waiting for input."
                            agent question
                            (if context (format "\n\nContext: %s" context) "")
                            agent))
-          (agent-shell--process-pending-request))))))
+          (unless shell-maker--busy
+            (agent-shell--process-pending-request)))))))
 
 (provide 'agent-shell-dispatch-messages)
 ;;; agent-shell-dispatch-messages.el ends here
