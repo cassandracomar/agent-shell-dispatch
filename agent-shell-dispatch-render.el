@@ -951,10 +951,8 @@ AGENTS maps buffer-name to agent-info."
                         0))
          (svg (svg-create (+ w agent-col-w) h)))
 
-    ;; Background
-    (svg-rectangle svg 0 0 (+ w agent-col-w) h
-                   :fill (agent-shell-dispatch-render-theme-bg theme)
-                   :rx (plist-get L :bg-rx))
+    ;; No background rect — transparent, matching agent-shell's header SVG.
+    ;; The header-line face provides the background via the window system.
 
     ;; Agent activity column (left side, no margin — header provides padding)
     (when (> agent-col-w 0)
