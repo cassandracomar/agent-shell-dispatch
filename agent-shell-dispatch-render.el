@@ -12,6 +12,14 @@
 (require 'color)
 (require 'svg)
 
+;; Forward declarations for buffer-local variables defined later
+(defvar agent-shell-dispatch-render-buffer)
+
+;; Cross-file struct accessors and functions (from agent-shell-dispatch.el)
+(declare-function agent-shell-dispatch-agent-info-name "agent-shell-dispatch" (info))
+(declare-function agent-shell-dispatch-agent-info-busy "agent-shell-dispatch" (info))
+(declare-function agent-shell-dispatch-global-mode "agent-shell-dispatch" (&optional arg))
+
 ;; ── Color blending (replaces doom-blend) ────────────────────────────
 
 (defun agent-shell-dispatch-render--blend-colors (color1 color2 alpha)
@@ -557,8 +565,8 @@ Returns edge positions."
 ;; ── Agent activity column ────────────────────────────────────────────
 
 (defun agent-shell-dispatch-render--baseline-offset (svg-font-size)
-  "Compute baseline-to-center offset for vertically centering text at SVG-FONT-SIZE.
-Positive value: baseline is below center."
+  "Baseline-to-center offset for centering text at SVG-FONT-SIZE.
+Positive value means baseline is below center."
   (let* ((theme (agent-shell-dispatch-render--theme-colors))
          (ar (agent-shell-dispatch-render-theme-ascent-ratio theme))
          (dr (agent-shell-dispatch-render-theme-descent-ratio theme)))
@@ -771,12 +779,11 @@ TASK-HEIGHTS, and LAYOUT constants."
 
 (defun agent-shell-dispatch-render-prepare (task-defs)
   "Compute topology, geometry, and node positions.
-TASK-DEFS is a list of `agent-shell-dispatch-render-task' structs.
-Returns a `agent-shell-dispatch-render-ctx' for `agent-shell-dispatch-render-draw'."
+TASK-DEFS is a list of render-task structs.
+Returns a render-ctx for `agent-shell-dispatch-render-draw'."
   (let* ((L (agent-shell-dispatch-render--derived-layout))
          (theme (agent-shell-dispatch-render--theme-colors))
          (node-pad (plist-get L :node-pad))
-         (col-gap (plist-get L :col-gap))
          (margin (plist-get L :margin))
          ;; Convert task structs to internal plists for topology functions
          (tasks-info (mapcar (lambda (td)
@@ -926,10 +933,10 @@ Returns a `agent-shell-dispatch-render-ctx' for `agent-shell-dispatch-render-dra
        :has-bypass has-bypass))))
 
 (defun agent-shell-dispatch-render-draw (ctx status-map &optional agents)
-  "Draw SVG from cached CTX with current STATUS-MAP and optional AGENTS hash.
-CTX is a agent-shell-dispatch-render-ctx from `agent-shell-dispatch-render-prepare'.
-STATUS-MAP is a hash of task-id -> agent-shell-dispatch-render-task-status.
-AGENTS is a hash of buffer-name -> agent-shell-dispatch-agent-info."
+  "Draw SVG from cached CTX with STATUS-MAP and AGENTS.
+CTX is from `agent-shell-dispatch-render-prepare'.
+STATUS-MAP maps task-id to render-task-status.
+AGENTS maps buffer-name to agent-info."
   (let* ((L (agent-shell-dispatch-render--derived-layout))
          (theme (agent-shell-dispatch-render--theme-colors))
          (topo (agent-shell-dispatch-render-ctx-topo ctx))
@@ -1000,7 +1007,7 @@ AGENTS is a hash of buffer-name -> agent-shell-dispatch-agent-info."
 
 (defun agent-shell-dispatch-render-apply-viewport (svg-str ctx status-map dispatcher-buf)
   "Apply viewBox panning to SVG-STR if wider than window.
-CTX is the cached agent-shell-dispatch-render-ctx. STATUS-MAP is the per-frame status hash.
+CTX is the render context, STATUS-MAP the per-frame status hash.
 DISPATCHER-BUF is the buffer name."
   (when-let* ((dims (agent-shell-dispatch-render--svg-dimensions svg-str))
               (svg-w (agent-shell-dispatch-render-dimensions-w dims))
@@ -1053,7 +1060,7 @@ DISPATCHER-BUF is the buffer name."
   "Buffer name for face resolution and heartbeat context.")
 
 (defvar-local agent-shell-dispatch-render-status-function nil
-  "Function of no args returning a hash of id → `agent-shell-dispatch-render-task-status'.
+  "Function returning a hash of id to render-task-status.
 Called every frame by the header renderer.")
 
 (defvar-local agent-shell-dispatch-render-agent-activity-function nil

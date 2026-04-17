@@ -14,6 +14,9 @@
 (require 'agent-shell-dispatch-render)
 (require 'agent-shell-dispatch-messages)
 
+;; Forward declaration — defined by `define-globalized-minor-mode' below
+(defvar agent-shell-dispatch-global-mode)
+
 ;; ── Dispatcher structs ──────────────────────────────────────────────
 
 (cl-defstruct (agent-shell-dispatch-state
@@ -97,8 +100,8 @@ Call from any buffer with active dispatch state."
              agents)))
 
 (defun agent-shell-dispatch--propagate-session-mode (orig-fn &rest args)
-  "Wrap session mode changes to propagate to subagents on success.
-:around advice on `agent-shell-cycle-session-mode' and `agent-shell-set-session-mode'."
+  "Propagate session mode changes to subagents.
+:around advice for cycle/set session mode."
   (if agent-shell-dispatch--state
       (let ((on-success (car args)))
         (funcall orig-fn
@@ -167,7 +170,6 @@ Tasks without a report are `not-started'."
          (agent-buf (plist-get task :agent))
          (buf (get-buffer agent-buf))
          (alive (and buf (get-buffer-process buf)))
-         (busy (and buf (buffer-local-value 'shell-maker--busy buf)))
          (reported (gethash id statuses))
          (rep-status (and reported (agent-shell-dispatch-reported-status-status reported)))
          (rep-detail (and reported (agent-shell-dispatch-reported-status-detail reported)))
@@ -441,6 +443,10 @@ Returns t on success, nil if buffer not found."
 
 ;; -- Global minor mode --
 
+(defgroup agent-shell-dispatch nil
+  "Multi-agent dispatch for agent-shell."
+  :group 'agent-shell)
+
 (define-globalized-minor-mode agent-shell-dispatch-global-mode
   agent-shell-dispatch--global-dummy
   agent-shell-dispatch--global-dummy
@@ -449,7 +455,7 @@ Installs advice for header rendering, queue draining, session mode
 propagation, and a theme change hook.  All are no-ops in buffers
 without active dispatch state (buffer-local).
 Enable in your config: (agent-shell-dispatch-global-mode 1)"
-  :group 'agent-shell
+  :group 'agent-shell-dispatch
   (if agent-shell-dispatch-global-mode
       (progn
         (when agent-shell-dispatch-render-advice-target
