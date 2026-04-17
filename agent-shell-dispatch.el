@@ -259,6 +259,10 @@ TASKS is a list of plists: ((:id ID :name NAME :agent AGENT-BUF) ...)."
                                                        (agent-shell--update-header-and-mode-line))
           agent-shell-dispatch-render-busy-p-function (lambda () shell-maker--busy)
           agent-shell-dispatch-render-advice-target 'agent-shell--update-header-and-mode-line)
+    ;; Ensure render advice is installed — the global mode body may have run
+    ;; before the advice target was set (e.g. at package load time).
+    (advice-add 'agent-shell--update-header-and-mode-line
+                :after #'agent-shell-dispatch-render--extend-header)
     ;; Enable render mode in dispatcher buffer
     (with-current-buffer (get-buffer dispatcher-buffer)
       (unless agent-shell-dispatch-render-mode
