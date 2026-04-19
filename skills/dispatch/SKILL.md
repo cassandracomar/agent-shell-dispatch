@@ -70,6 +70,11 @@ The header graph updates at ~100ms with spinners and status colors. Geometry is 
 
 Then send each agent its task using the subagent template. Read `SUBAGENT_TEMPLATE.md` (in the same directory as this skill) and customize it per task — replace TASK_NAME, TASK_ID, TASK_DESCRIPTION, and CRITERIA with the actual values.
 
+**Org TODO coordination:** When customizing the subagent template for projects that use org-mode TODO tracking:
+- Map each task to an org TODO heading in the project
+- Fill in the TODO_FILE and TODO_HEADING placeholders in the template
+- Agents will mark their TODOs as DONE via emacsclient when they complete
+
 Use `agent-shell-dispatch-agent-buffer` to resolve the short agent name to its full buffer name:
 
 ```elisp
@@ -85,6 +90,8 @@ Use `agent-shell-dispatch-agent-buffer` to resolve the short agent name to its f
 ```
 
 ## Step 4: Wait for User
+
+**CRITICAL: End your turn immediately after launching agents and sending tasks.** Do NOT make any additional tool calls (Read, Bash, etc.) after spawning background agents — this keeps your turn open and blocks user interaction. Trust the notification system; task completions trigger new turns automatically.
 
 Tell the user:
 
@@ -202,3 +209,5 @@ When the user tells you all tasks are complete:
 - Never implement tasks yourself — coordinate.
 - Always clean up agents and stop polling when dispatch is complete.
 - The user can manually toggle rendering off with `M-x agent-shell-dispatch-render-mode` if something goes wrong.
+- Workers must verify their changes before marking complete (tangle org blocks via emacsclient, eval elisp, run tests). The dispatcher should NOT ask the user for confirmation of routine verification.
+- Code changes to forks or repos must be committed and pushed to GitHub as part of completing work.
