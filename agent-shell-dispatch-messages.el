@@ -465,7 +465,8 @@ Queues a prompt so the dispatcher can review and mark the task done."
       (with-current-buffer buf
         (agent-shell--enqueue-request
          :prompt (format "[Task Complete: %s (task: %s)]\n\n%s" agent task-id summary))
-        (agent-shell--process-pending-request)))))
+        (unless shell-maker--busy
+          (agent-shell--process-pending-request))))))
 
 (cl-defmethod agent-shell-dispatch-msg-handle
   ((msg agent-shell-dispatch-msg-error) target-buf)
@@ -481,7 +482,8 @@ Queues a prompt so the dispatcher can update the task graph."
          :prompt (format "[Task Error: %s (task: %s)]\n\n%s%s"
                          agent task-id desc
                          (if ctx (format "\n\nContext: %s" ctx) "")))
-        (agent-shell--process-pending-request)))))
+        (unless shell-maker--busy
+          (agent-shell--process-pending-request))))))
 
 (cl-defmethod agent-shell-dispatch-msg-handle
   ((msg agent-shell-dispatch-msg-input-needed) target-buf)
@@ -499,7 +501,8 @@ Also tracks the agent as waiting for input."
                            agent question
                            (if context (format "\n\nContext: %s" context) "")
                            agent))
-          (agent-shell--process-pending-request))))))
+          (unless shell-maker--busy
+            (agent-shell--process-pending-request)))))))
 
 (provide 'agent-shell-dispatch-messages)
 ;;; agent-shell-dispatch-messages.el ends here

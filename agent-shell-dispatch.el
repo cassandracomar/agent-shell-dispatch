@@ -321,8 +321,8 @@ No window popup, no session prompt.  Copies the session mode from the
 primary (dispatcher) buffer.  Permissions are rendered in the dispatcher buffer.
 BUFFER-NAME, if provided, is incorporated into the buffer label."
   (let* ((cfg (copy-alist config))
-         (mode-id (or (when-let* ((primary agent-shell-dispatch--primary-buffer)
-                                  (pbuf (get-buffer primary)))
+         (primary agent-shell-dispatch--primary-buffer)
+         (mode-id (or (when-let* ((pbuf (and primary (get-buffer primary))))
                         (with-current-buffer pbuf
                           (map-nested-elt agent-shell--state '(:session :mode-id))))
                       "default"))
@@ -339,7 +339,8 @@ BUFFER-NAME, if provided, is incorporated into the buffer label."
                                   :session-strategy 'new))
     (when (buffer-live-p buf)
       (with-current-buffer buf
-        (setq-local agent-shell-permission-responder-function
+        (setq-local agent-shell-dispatch--primary-buffer primary
+                    agent-shell-permission-responder-function
                     #'agent-shell-dispatch-forward-permission)))
     buf))
 
@@ -359,7 +360,8 @@ Returns the buffer name."
                      (when (buffer-live-p b)
                        (with-current-buffer b
                          (agent-shell--enqueue-request :prompt msg)
-                         (agent-shell--process-pending-request))))
+                         (unless shell-maker--busy
+                           (agent-shell--process-pending-request)))))
                    buf initial-message))
     (when (buffer-live-p buf)
       ;; Register in dispatcher's agent set (keyed by display name)
@@ -402,7 +404,8 @@ Returns t on success, nil if buffer not found."
                         (format "[From: %s]\n\n%s" from message)
                       message)))
         (agent-shell--enqueue-request :prompt prompt)
-        (agent-shell--process-pending-request)))
+        (unless shell-maker--busy
+          (agent-shell--process-pending-request))))
     t))
 
 (defun agent-shell-dispatch-view-agent (buffer-name &optional num-lines)

@@ -20,8 +20,10 @@ Code blocks below show the elisp to evaluate. Wrap them with whichever method yo
 ## When to Use
 
 - User has a plan (or discussed in conversation)
-- Work can be split across 2-3 independent implementation agents
+- Work can be split across 2+ independent implementation agents
 - User wants parallel execution with review
+
+There is no hard cap on agent count — parallelism is bounded by coordination overhead and the filesystem isolation story (see "Parallelism and isolation" below), not by an arbitrary number.
 
 ## Step 1: Gather Context
 
@@ -30,7 +32,7 @@ Code blocks below show the elisp to evaluate. Wrap them with whichever method yo
 3. **Project state**: Current branch, recent commits, key files
 4. **Elisp eval method**: Determine which method YOU have for evaluating elisp (see "Evaluating Elisp" above). Test it now — the method that works for you is the one subagents will have too. Record the exact tool name or command so you can bake it into the subagent template (replacing the generic "Evaluating Elisp" section with a concrete instruction like "Use the `mcp__emacs__emacs_eval_elisp` tool to evaluate elisp").
 5. **User parameters** (ask if not specified):
-   - Number of impl agents (default: 2, max: 3)
+   - Number of impl agents (default: 2; no hard max, but see isolation caveats)
    - Review policy: `per-task`, `batch`, or `none`
 
 ## Step 2: Register as Dispatcher and Spawn Agents
@@ -52,33 +54,43 @@ Then spawn agents. They run in the background (no popup, no prompts, acceptEdits
  "You are Impl-1. Wait for your task assignment.")
 ```
 
-Repeat for each agent.
+`agent-shell-dispatch-spawn-agent` returns the FULL buffer name of the spawned agent (e.g. `"[agent:Impl-1] Agent @ project"`). **Capture and use this string** — do not rely on `(agent-shell-dispatch-agent-buffer "Impl-1")` to resolve it later. The short-name resolver has been unreliable in practice (returns nil). If you respawn an agent with the same short name after killing a prior instance, Emacs adds a `<N>` disambiguation suffix (e.g. `<2>`); always use the exact string returned by `spawn-agent`.
 
-## Step 3: Assign Tasks and Start Task Graph
+Repeat for each agent. If you need filesystem isolation (parallel impl agents writing to the same repo), see "Parallelism and isolation" below — spawn each agent in its own git worktree directory.
 
-Send each agent its task using the subagent template. Read `SUBAGENT_TEMPLATE.md` (in the same directory as this skill) and customize it per task — replace TASK_NAME, TASK_ID, TASK_DESCRIPTION, and CRITERIA with the actual values.
+## Step 3: Start Task Graph, Then Assign Tasks
 
-Use `agent-shell-dispatch-agent-buffer` to resolve the short agent name to its full buffer name:
+**CRITICAL ORDER:** start the task graph FIRST, then send tasks and report statuses. If you call `agent-shell-dispatch-report` before `agent-shell-dispatch-start`, the report is wiped when start re-initializes state and the graph will render as "not started" indefinitely.
 
-```elisp
-(agent-shell-dispatch-send-to-agent
- (agent-shell-dispatch-agent-buffer "Impl-1")
- "CUSTOMIZED-TEMPLATE-CONTENT"
- "dispatcher")
-```
+### Step 3a: Start the task graph renderer
 
-**After sending each task, mark it as working** — you own all task graph updates:
-```elisp
-(agent-shell-dispatch-report "TASK-ID" "working")
-```
-
-After sending ALL tasks, start the task graph renderer. It enables `agent-shell-dispatch-render-mode` in the dispatcher buffer, rendering a live SVG dependency graph in the header. Pass a list of task plists:
+This enables `agent-shell-dispatch-render-mode` in the dispatcher buffer and initializes the statuses hash. Pass a list of task plists using the exact agent buffer names returned by `spawn-agent`:
 
 ```elisp
 (agent-shell-dispatch-start
  (buffer-name)
- '((:id "impl-1" :name "Task 1 description" :agent "Claude Agent @ doom-config<N>")
-   (:id "impl-2" :name "Task 2 description" :agent "Claude Agent @ doom-config<M>")))
+ '((:id "impl-1" :name "Task 1 description" :agent "[agent:Impl-1] Agent @ project")
+   (:id "impl-2" :name "Task 2 description" :agent "[agent:Impl-2] Agent @ project")))
+```
+
+### Step 3b: Customize and send the subagent template
+
+Read `SUBAGENT_TEMPLATE.md` (in the same directory as this skill) and customize it per task — replace TASK_NAME, TASK_ID, TASK_DESCRIPTION, CRITERIA, and `DISPATCHER_PRIMARY_BUFFER_NAME` with the actual values.
+
+**IMPORTANT:** `agent-shell-dispatch--primary-buffer` is buffer-local to the dispatcher. Subagents evaluating elisp see it as `nil`, which makes their message-send calls fail with "stringp nil". You MUST substitute the literal string value of `(buffer-name)` (your dispatcher buffer name) into the template everywhere the subagent needs to reference the dispatcher. SUBAGENT_TEMPLATE.md uses `"DISPATCHER_PRIMARY_BUFFER_NAME"` as the placeholder — replace it with e.g. `"Claude Agent @ project"`.
+
+```elisp
+(agent-shell-dispatch-send-to-agent
+ "[agent:Impl-1] Agent @ project"   ; full buffer name from spawn-agent
+ "CUSTOMIZED-TEMPLATE-CONTENT"
+ "dispatcher")
+```
+
+### Step 3c: Mark each task as working
+
+After sending all tasks, report them as working:
+```elisp
+(agent-shell-dispatch-report "TASK-ID" "working" "brief current phase")
 ```
 
 The header graph updates at ~100ms with spinners and status colors. Geometry is cached; only status colors redraw per frame. You do NOT need to poll or check statuses.
@@ -96,6 +108,7 @@ Tell the user:
 
 ### Task graph updates:
 **You own all task graph updates.** Subagents do NOT call `agent-shell-dispatch-report` — they communicate via messages only. You will receive queued prompts for:
+- `[Task Progress: agent (task: ID)]` — subagent announcing start / phase transition. Optional informational signal. The phase label updates in the header automatically.
 - `[Task Complete: agent (task: ID)]` — subagent finished. If reviews are required (see review policy from Step 1), do NOT mark the task done yet — spawn or send a reviewer first. Only mark done after the review passes:
   ```elisp
   (agent-shell-dispatch-report "TASK-ID" "done")
@@ -104,6 +117,9 @@ Tell the user:
   ```elisp
   (agent-shell-dispatch-report "TASK-ID" "error" "reason")
   ```
+
+### Recovery if a subagent's message fails to arrive:
+MCP transport errors ("stringp nil", JSON-RPC envelope errors) can cause a subagent's `agent-shell-dispatch-msg-send` call to fail. SUBAGENT_TEMPLATE.md tells subagents to emit a `===DISPATCH-FALLBACK===` block at the end of their work in that case. If an agent's status shows `ready` (idle) but you never got a Task Complete prompt, harvest its output via `agent-shell-dispatch-view-agent` and look for the fallback block. Use it to mark the task done manually.
 
 ### Review flow:
 When the review policy requires reviews:
@@ -167,6 +183,48 @@ When the user tells you all tasks are complete:
 (agent-shell-dispatch-kill-agents)
 ```
 
+Note: killed agents may leave their buffers behind (especially if you respawned agents within the same session — old instances persist as `<N>`-suffixed buffers). Clean them up explicitly if they clutter the buffer list:
+
+```elisp
+(dolist (b (buffer-list))
+  (when (string-match-p "^\\[agent:" (buffer-name b))
+    (kill-buffer b)))
+```
+
+5. **Clean up worktrees** (if you created them for isolation — see below):
+```bash
+git worktree remove --force /tmp/up-log-<name>   # per worktree
+git branch -D fix/<name>                          # if the branch is no longer needed
+```
+
+## Parallelism and isolation
+
+When multiple impl agents touch the same repository in parallel, they will race on the working tree. Use git worktrees — one per agent — to give each agent its own filesystem.
+
+```bash
+git worktree add /tmp/project-impl-1 -b fix/area-1 base-branch
+git worktree add /tmp/project-impl-2 -b fix/area-2 base-branch
+```
+
+Then spawn each agent with the corresponding directory:
+
+```elisp
+(agent-shell-dispatch-spawn-agent "/tmp/project-impl-1" "Impl-1" "You are Impl-1. Wait for task assignment.")
+(agent-shell-dispatch-spawn-agent "/tmp/project-impl-2" "Impl-2" "You are Impl-2. Wait for task assignment.")
+```
+
+Each agent commits to its own branch. When all agents complete, merge the branches back into the base branch (or let the user do so). Merge conflicts between sibling branches are expected for adjacent code; resolve in the dispatcher before final integration.
+
+Worktree isolation is REQUIRED when:
+- Multiple agents edit the same files
+- Multiple agents run `cargo test` / `npm test` / etc. concurrently (build artifacts collide)
+- You want clean per-task branches for code review or cherry-picking
+
+It's optional when:
+- Agents work on fully separate crates/packages AND don't rebuild shared artifacts AND don't touch any shared config
+
+When in doubt, use worktrees.
+
 ## Agent Communication Reference
 
 | Action | Function |
@@ -188,8 +246,11 @@ When the user tells you all tasks are complete:
 
 - You ARE the dispatcher. Don't start a separate session.
 - ALL agent management via elisp evaluation in Emacs.
-- Use `(agent-shell-dispatch-agent-buffer "Name")` to resolve agent names to buffer names.
+- Use the full buffer name returned by `spawn-agent` everywhere (don't rely on `agent-shell-dispatch-agent-buffer` name resolution — it has been unreliable).
+- Subagents cannot reference `agent-shell-dispatch--primary-buffer` (it's buffer-local to you). Substitute the literal dispatcher buffer name into their templates.
+- Start the task graph (`agent-shell-dispatch-start`) BEFORE reporting statuses (`agent-shell-dispatch-report`). Reports made before start are wiped.
 - Assign ONE task per agent at a time.
+- For parallel impl agents editing the same repo, use git worktrees.
 - Permissions are shown directly to the user — do NOT accept or reject on their behalf.
 - Do NOT poll or check statuses in a loop — the elisp timer handles progress.
 - Wait for the user to tell you when tasks are done or need intervention.
@@ -198,6 +259,7 @@ When the user tells you all tasks are complete:
   `agent-shell-dispatch-send-to-agent`. If the question is ambiguous or you
   lack context to answer confidently, ask the USER for clarification before
   responding to the subagent — don't guess.
+- If a subagent's status goes `ready` (idle) without a Task Complete prompt, check its buffer for a `===DISPATCH-FALLBACK===` block — MCP transport errors can silently drop message sends.
 - Never implement tasks yourself — coordinate.
-- Always clean up agents and stop polling when dispatch is complete.
+- Always clean up agents, worktrees (if any), and stop polling when dispatch is complete.
 - The user can manually toggle rendering off with `M-x agent-shell-dispatch-render-mode` if something goes wrong.
