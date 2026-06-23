@@ -141,15 +141,79 @@ Returns the buffer name string, or nil if not found."
 
 ;; -- Dispatch task graph and progress rendering --
 
+(defun agent-shell-dispatch--agent-shell-buffer-p (buf &optional require-dispatch)
+  "Return non-nil when BUF is an `agent-shell-mode' buffer.
+With REQUIRE-DISPATCH, require BUF to have active dispatch state."
+  (and (buffer-live-p buf)
+       (with-current-buffer buf
+         (and (derived-mode-p 'agent-shell-mode)
+              (or (not require-dispatch)
+                  agent-shell-dispatch--state)))))
+
+(defun agent-shell-dispatch--agent-shell-buffers (&optional require-dispatch visible-only)
+  "Return candidate `agent-shell-mode' buffers.
+With REQUIRE-DISPATCH, only include buffers with active dispatch state.
+With VISIBLE-ONLY, only include buffers visible in a live window."
+  (let ((buffers (if visible-only
+                     (delete-dups (mapcar #'window-buffer (window-list nil 'no-minibuf)))
+                   (buffer-list))))
+    (cl-remove-if-not
+     (lambda (buf)
+       (agent-shell-dispatch--agent-shell-buffer-p buf require-dispatch))
+     buffers)))
+
+(defun agent-shell-dispatch--resolve-agent-shell-buffer (&optional buffer require-dispatch)
+  "Resolve the `agent-shell-mode' buffer associated with this request.
+BUFFER may be a buffer or buffer name and wins when supplied.  Otherwise,
+prefer the current buffer, then the selected window's buffer, then a single
+visible candidate, then a single live candidate.  With REQUIRE-DISPATCH, only
+consider buffers with active dispatch state."
+  (let ((explicit (and buffer (get-buffer buffer))))
+    (cond
+     ((and buffer (null explicit))
+      (error "No such buffer: %S" buffer))
+     ((and explicit
+           (agent-shell-dispatch--agent-shell-buffer-p explicit require-dispatch))
+      explicit)
+     (explicit
+      (error "Buffer is not an active agent-shell buffer: %s" (buffer-name explicit)))
+     ((agent-shell-dispatch--agent-shell-buffer-p (current-buffer) require-dispatch)
+      (current-buffer))
+     ((agent-shell-dispatch--agent-shell-buffer-p (window-buffer (selected-window))
+                                                  require-dispatch)
+      (window-buffer (selected-window)))
+     (t
+      (let ((visible (agent-shell-dispatch--agent-shell-buffers require-dispatch t)))
+        (cond
+         ((= (length visible) 1) (car visible))
+         (t
+          (let ((all (agent-shell-dispatch--agent-shell-buffers require-dispatch)))
+            (cond
+             ((= (length all) 1) (car all))
+             (all
+              (error "Ambiguous agent-shell buffers; pass one explicitly: %s"
+                     (mapconcat #'buffer-name all ", ")))
+             (t
+              (error "No agent-shell buffer found")))))))))))
+
+(defun agent-shell-dispatch-current-agent-buffer (&optional buffer)
+  "Return the `agent-shell-mode' buffer associated with this request.
+BUFFER may be a buffer or buffer name and is returned after validation.
+This is intended for MCP/eval callers where `current-buffer' may be an
+approval or control buffer rather than the shell that initiated the request."
+  (agent-shell-dispatch--resolve-agent-shell-buffer buffer))
+
+(defun agent-shell-dispatch-current-agent-buffer-name (&optional buffer)
+  "Return the name of `agent-shell-dispatch-current-agent-buffer'."
+  (buffer-name (agent-shell-dispatch-current-agent-buffer buffer)))
+
 (defun agent-shell-dispatch--clear-state ()
   "Clear dispatch state. Used as teardown hook."
   (setq agent-shell-dispatch--state nil))
 
 
-(defun agent-shell-dispatch-report (task-id status &optional detail)
-  "Report STATUS for TASK-ID. Called by agents via MCP.
-STATUS is a string: \"working\", \"done\", \"error\".
-DETAIL is an optional description of current activity."
+(defun agent-shell-dispatch--record-report (task-id status &optional detail)
+  "Record STATUS for TASK-ID in the current dispatch buffer."
   (when-let* ((state agent-shell-dispatch--state)
               (statuses (agent-shell-dispatch-state-statuses state)))
     (puthash task-id
@@ -158,6 +222,15 @@ DETAIL is an optional description of current activity."
               :detail detail
               :updated (current-time))
              statuses)))
+
+(defun agent-shell-dispatch-report (task-id status &optional detail)
+  "Report STATUS for TASK-ID. Called by agents via MCP.
+STATUS is a string: \"working\", \"done\", \"error\".
+DETAIL is an optional description of current activity."
+  (if agent-shell-dispatch--state
+      (agent-shell-dispatch--record-report task-id status detail)
+    (with-current-buffer (agent-shell-dispatch--resolve-agent-shell-buffer nil t)
+      (agent-shell-dispatch--record-report task-id status detail))))
 
 
 
@@ -270,16 +343,31 @@ TASKS is a list of plists: ((:id ID :name NAME :agent AGENT-BUF) ...)."
       (unless agent-shell-dispatch-render-mode
         (agent-shell-dispatch-render-mode 'toggle)))))
 
+(defun agent-shell-dispatch-start-current (tasks &optional buffer interval)
+  "Start the dispatch task graph in the current request's agent shell.
+TASKS is forwarded to `agent-shell-dispatch-start'.  BUFFER may be a buffer or
+buffer name and should be supplied when multiple agent-shell buffers are open
+and none is selected."
+  (let ((buf (agent-shell-dispatch-current-agent-buffer buffer)))
+    (with-current-buffer buf
+      (agent-shell-dispatch-start (buffer-name buf) tasks interval))))
+
 
 (defun agent-shell-dispatch-stop ()
   "Stop rendering. State preserved for mode toggle."
-  (when agent-shell-dispatch-render-mode
-    (agent-shell-dispatch-render-mode 'toggle))
-  ;; Safety net: clear ctx and reset header even if mode was already off
-  (when agent-shell-dispatch-render--ctx
-    (setq agent-shell-dispatch-render--ctx nil)
-    (when agent-shell-dispatch-render-reset-function
-      (ignore-errors (funcall agent-shell-dispatch-render-reset-function)))))
+  (let ((buf (if agent-shell-dispatch--state
+                 (current-buffer)
+               (ignore-errors
+                 (agent-shell-dispatch--resolve-agent-shell-buffer nil t)))))
+    (when buf
+      (with-current-buffer buf
+        (when agent-shell-dispatch-render-mode
+          (agent-shell-dispatch-render-mode 'toggle))
+        ;; Safety net: clear ctx and reset header even if mode was already off
+        (when agent-shell-dispatch-render--ctx
+          (setq agent-shell-dispatch-render--ctx nil)
+          (when agent-shell-dispatch-render-reset-function
+            (ignore-errors (funcall agent-shell-dispatch-render-reset-function))))))))
 
 ;; Backward-compat aliases for old skill API
 (defun agent-shell-dispatch-start-progress-polling (dispatcher-buffer agents &optional interval)

@@ -36,8 +36,7 @@ Break the work into discrete steps. Identify dependencies between them — which
 Each task is a plist with `:id`, `:name`, `:agent` (your buffer name), and optionally `:depends-on` (list of task IDs that must complete first):
 
 ```elisp
-(agent-shell-dispatch-start
- (buffer-name)
+(agent-shell-dispatch-start-current
  '((:id "step-1" :name "Read codebase")
    (:id "step-2" :name "Write tests" :depends-on ("step-1"))
    (:id "step-3" :name "Implement feature" :depends-on ("step-1"))

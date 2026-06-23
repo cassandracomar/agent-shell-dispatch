@@ -67,8 +67,7 @@ Repeat for each agent. If you need filesystem isolation (parallel impl agents wr
 This enables `agent-shell-dispatch-render-mode` in the dispatcher buffer and initializes the statuses hash. Pass a list of task plists using the exact agent buffer names returned by `spawn-agent`:
 
 ```elisp
-(agent-shell-dispatch-start
- (buffer-name)
+(agent-shell-dispatch-start-current
  '((:id "impl-1" :name "Task 1 description" :agent "[agent:Impl-1] Agent @ project")
    (:id "impl-2" :name "Task 2 description" :agent "[agent:Impl-2] Agent @ project")))
 ```
@@ -77,7 +76,7 @@ This enables `agent-shell-dispatch-render-mode` in the dispatcher buffer and ini
 
 Read `SUBAGENT_TEMPLATE.md` (in the same directory as this skill) and customize it per task — replace TASK_NAME, TASK_ID, TASK_DESCRIPTION, CRITERIA, and `DISPATCHER_PRIMARY_BUFFER_NAME` with the actual values.
 
-**IMPORTANT:** `agent-shell-dispatch--primary-buffer` is buffer-local to the dispatcher. Subagents evaluating elisp see it as `nil`, which makes their message-send calls fail with "stringp nil". You MUST substitute the literal string value of `(buffer-name)` (your dispatcher buffer name) into the template everywhere the subagent needs to reference the dispatcher. SUBAGENT_TEMPLATE.md uses `"DISPATCHER_PRIMARY_BUFFER_NAME"` as the placeholder — replace it with e.g. `"Claude Agent @ project"`.
+**IMPORTANT:** `agent-shell-dispatch--primary-buffer` is buffer-local to the dispatcher. Subagents evaluating elisp see it as `nil`, which makes their message-send calls fail with "stringp nil". You MUST substitute the literal string value of `(agent-shell-dispatch-current-agent-buffer-name)` (your dispatcher buffer name) into the template everywhere the subagent needs to reference the dispatcher. SUBAGENT_TEMPLATE.md uses `"DISPATCHER_PRIMARY_BUFFER_NAME"` as the placeholder — replace it with e.g. `"Codex Agent @ project"`.
 
 ```elisp
 (agent-shell-dispatch-send-to-agent

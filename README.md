@@ -145,6 +145,8 @@ All dispatch and render state is buffer-local, so multiple independent dispatch 
 | `agent-shell-dispatch-view-agent` | View recent output from one agent |
 | `agent-shell-dispatch-view-all-agents` | View recent output from all agents |
 | `agent-shell-dispatch-start` | Register tasks and start the SVG task graph |
+| `agent-shell-dispatch-start-current` | Start the SVG task graph in the current request's agent-shell buffer |
+| `agent-shell-dispatch-current-agent-buffer-name` | Resolve the agent-shell buffer name associated with an MCP/eval request |
 | `agent-shell-dispatch-stop` | Stop rendering (state preserved for toggle) |
 | `agent-shell-dispatch-report` | Report task status -- dispatcher only |
 | `agent-shell-dispatch-agent-buffer` | Look up full buffer name from short agent name |
