@@ -69,20 +69,22 @@ If a step fails:
 
 For significant milestones visible to the user:
 ```elisp
-(agent-shell-dispatch-msg-send
- (agent-shell-dispatch-msg-task-progress-make
-  :agent-buffer (buffer-name) :timestamp (current-time)
-  :phase "Switching to integration testing")
- agent-shell-dispatch--primary-buffer)
+(let ((buf (agent-shell-dispatch-current-agent-buffer-name)))
+  (agent-shell-dispatch-msg-send
+   (agent-shell-dispatch-msg-task-progress-make
+    :agent-buffer buf :timestamp (current-time)
+    :phase "Switching to integration testing")
+   buf))
 ```
 
 When your overall task is done:
 ```elisp
-(agent-shell-dispatch-msg-send
- (agent-shell-dispatch-msg-task-completed-make
-  :agent-buffer (buffer-name) :timestamp (current-time)
-  :task-id "step-5" :summary "Feature implemented and all tests passing")
- agent-shell-dispatch--primary-buffer)
+(let ((buf (agent-shell-dispatch-current-agent-buffer-name)))
+  (agent-shell-dispatch-msg-send
+   (agent-shell-dispatch-msg-task-completed-make
+    :agent-buffer buf :timestamp (current-time)
+    :task-id "step-5" :summary "Feature implemented and all tests passing")
+   buf))
 ```
 
 ## Step 4: Clean Up

@@ -7,7 +7,7 @@ TASK_DESCRIPTION
 DISPATCHER: Replace this section with the specific method you discovered in Step 1, e.g.:
 "Use the `mcp__emacs__emacs_eval_elisp` tool to evaluate all elisp in this template."
 
-DISPATCHER: Also substitute every literal occurrence of `"DISPATCHER_PRIMARY_BUFFER_NAME"` in this template with the exact string name of your own dispatcher buffer. The variable `agent-shell-dispatch--primary-buffer` is buffer-local to the dispatcher — subagents cannot see its value. Evaluate `(buffer-name)` in your dispatcher buffer once and paste the literal string in its place.
+DISPATCHER: Also substitute every literal occurrence of `"DISPATCHER_PRIMARY_BUFFER_NAME"` in this template with the exact string name of your own dispatcher buffer. The variable `agent-shell-dispatch--primary-buffer` is buffer-local to the dispatcher — subagents cannot see its value. Evaluate `(agent-shell-dispatch-current-agent-buffer-name)` in your dispatcher request context once and paste the literal string in its place.
 
 Fallback (if dispatcher did not replace this section):
 1. **Emacs MCP** — an `emacs_eval_elisp` tool (exact name depends on MCP server configuration)

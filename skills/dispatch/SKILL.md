@@ -40,7 +40,8 @@ There is no hard cap on agent count — parallelism is bounded by coordination o
 First, register your buffer as the dispatcher so permission requests render here:
 
 ```elisp
-(setq agent-shell-dispatch--primary-buffer (buffer-name))
+(setq agent-shell-dispatch--primary-buffer
+      (agent-shell-dispatch-current-agent-buffer-name))
 ```
 
 Then spawn agents. They run in the background (no popup, no prompts, acceptEdits mode). Non-edit permissions (bash, etc.) render as button dialogs in YOUR buffer — the user handles them directly. You do NOT handle permissions.
