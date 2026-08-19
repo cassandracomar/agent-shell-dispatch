@@ -11,8 +11,23 @@
 (require 'cl-lib)
 (require 'map)
 (require 'agent-shell)
+(require 'agent-shell-prompt-queue)
 (require 'agent-shell-dispatch-render)
 (require 'agent-shell-dispatch-messages)
+
+;; Private API declarations — these symbols still exist in agent-shell v0.73.4
+;; but are not part of the public contract. Pin to a known-good version and
+;; re-verify on upstream updates.
+(declare-function agent-shell--start "agent-shell")
+(declare-function agent-shell--update-header-and-mode-line "agent-shell")
+(declare-function agent-shell--make-permission-button "agent-shell")
+(declare-function agent-shell-subscribe-to "agent-shell")
+(declare-function agent-shell-unsubscribe "agent-shell")
+(declare-function agent-shell--prompt-queue-enqueue "agent-shell-prompt-queue")
+(declare-function agent-shell--prompt-queue-process-next "agent-shell-prompt-queue")
+(declare-function shell-maker-busy "shell-maker")
+(defvar agent-shell--state)
+(defvar agent-shell--header-cache)
 
 ;; Forward declaration — defined by `define-globalized-minor-mode' below
 (defvar agent-shell-dispatch-global-mode)
@@ -23,7 +38,7 @@
                (:constructor agent-shell-dispatch-state-make)
                (:copier nil))
   "Active dispatch session state."
-  dispatcher-buffer tasks statuses agents)
+  dispatcher-buffer tasks statuses agents turn-complete-subscription)
 
 (cl-defstruct (agent-shell-dispatch-agent-info
                (:constructor agent-shell-dispatch-agent-info-make)
@@ -72,16 +87,16 @@ Safety net: if a message handler enqueued while the dispatcher was busy,
 this ensures the request is processed once the dispatcher goes idle."
   (when (and agent-shell-dispatch--state
              (derived-mode-p 'agent-shell-mode)
-             (not shell-maker--busy))
+             (not (shell-maker-busy)))
     (let ((buf (current-buffer)))
       (run-with-idle-timer
        0.2 nil
        (lambda ()
          (when (buffer-live-p buf)
            (with-current-buffer buf
-             (when (and (not shell-maker--busy)
+             (when (and (not (shell-maker-busy))
                         (derived-mode-p 'agent-shell-mode))
-               (agent-shell--process-pending-request)))))))))
+               (agent-shell--prompt-queue-process-next)))))))))
 
 ;; -- Session mode propagation --
 
@@ -113,7 +128,7 @@ Call from any buffer with active dispatch state."
 ;; -- Agent activity tracking --
 
 (defun agent-shell-dispatch--update-agent-activity ()
-  "Update busy state for all tracked agents by reading `shell-maker--busy'.
+  "Update busy state for all tracked agents via `shell-maker-busy'.
 Called each render frame from the dispatcher buffer."
   (when-let* ((state agent-shell-dispatch--state)
               (agents (agent-shell-dispatch-state-agents state)))
@@ -122,7 +137,7 @@ Called each render frame from the dispatcher buffer."
                  (setf (agent-shell-dispatch-agent-info-busy info)
                        (and buf
                             (buffer-live-p buf)
-                            (buffer-local-value 'shell-maker--busy buf)))))
+                            (with-current-buffer buf (shell-maker-busy))))))
              agents)))
 
 (defun agent-shell-dispatch--get-agents ()
@@ -208,7 +223,10 @@ approval or control buffer rather than the shell that initiated the request."
   (buffer-name (agent-shell-dispatch-current-agent-buffer buffer)))
 
 (defun agent-shell-dispatch--clear-state ()
-  "Clear dispatch state. Used as teardown hook."
+  "Clear dispatch state and unsubscribe from events. Used as teardown hook."
+  (when-let* ((state agent-shell-dispatch--state)
+              (token (agent-shell-dispatch-state-turn-complete-subscription state)))
+    (ignore-errors (agent-shell-unsubscribe :subscription token)))
   (setq agent-shell-dispatch--state nil))
 
 
@@ -316,7 +334,13 @@ TASKS is a list of plists: ((:id ID :name NAME :agent AGENT-BUF) ...)."
            :dispatcher-buffer dispatcher-buffer
            :tasks normalized
            :statuses (make-hash-table :test 'equal)
-           :agents (make-hash-table :test 'equal)))
+           :agents (make-hash-table :test 'equal)
+           :turn-complete-subscription
+           (agent-shell-subscribe-to
+            :shell-buffer (get-buffer dispatcher-buffer)
+            :event 'turn-complete
+            :on-event (lambda (_event)
+                        (agent-shell-dispatch--drain-queue)))))
     ;; Auto-enable global mode if not already on
     (unless agent-shell-dispatch-global-mode
       (agent-shell-dispatch-global-mode 1))
@@ -332,7 +356,7 @@ TASKS is a list of plists: ((:id ID :name NAME :agent AGENT-BUF) ...)."
                                                        (when (boundp 'agent-shell--header-cache)
                                                          (setq agent-shell--header-cache nil))
                                                        (agent-shell--update-header-and-mode-line))
-          agent-shell-dispatch-render-busy-p-function (lambda () shell-maker--busy)
+          agent-shell-dispatch-render-busy-p-function #'shell-maker-busy
           agent-shell-dispatch-render-advice-target 'agent-shell--update-header-and-mode-line)
     ;; Ensure render advice is installed — the global mode body may have run
     ;; before the advice target was set (e.g. at package load time).
@@ -447,9 +471,9 @@ Returns the buffer name."
                    (lambda (b msg)
                      (when (buffer-live-p b)
                        (with-current-buffer b
-                         (agent-shell--enqueue-request :prompt msg)
-                         (unless shell-maker--busy
-                           (agent-shell--process-pending-request)))))
+                         (agent-shell--prompt-queue-enqueue :prompt msg)
+                         (unless (shell-maker-busy)
+                           (agent-shell--prompt-queue-process-next)))))
                    buf initial-message))
     (when (buffer-live-p buf)
       ;; Register in dispatcher's agent set (keyed by display name)
@@ -474,7 +498,7 @@ Returns list of plists with :buffer and :status."
                  (string-match-p "\\[agent:" (buffer-name buf)))
         (push (list :buffer (buffer-name buf)
                     :status (if (with-current-buffer buf
-                                  shell-maker--busy)
+                                  (shell-maker-busy))
                                 "busy" "ready"))
               result)))
     (nreverse result)))
@@ -491,9 +515,9 @@ Returns t on success, nil if buffer not found."
       (let ((prompt (if from
                         (format "[From: %s]\n\n%s" from message)
                       message)))
-        (agent-shell--enqueue-request :prompt prompt)
-        (unless shell-maker--busy
-          (agent-shell--process-pending-request))))
+        (agent-shell--prompt-queue-enqueue :prompt prompt)
+        (unless (shell-maker-busy)
+          (agent-shell--prompt-queue-process-next))))
     t))
 
 (defun agent-shell-dispatch-view-agent (buffer-name &optional num-lines)
@@ -552,8 +576,6 @@ Enable in your config: (agent-shell-dispatch-global-mode 1)"
         (when agent-shell-dispatch-render-advice-target
           (advice-add agent-shell-dispatch-render-advice-target
                       :after #'agent-shell-dispatch-render--extend-header))
-        (advice-add 'shell-maker-finish-output
-                    :after #'agent-shell-dispatch--drain-queue)
         (advice-add 'agent-shell-cycle-session-mode
                     :around #'agent-shell-dispatch--propagate-session-mode)
         (advice-add 'agent-shell-set-session-mode
@@ -563,8 +585,6 @@ Enable in your config: (agent-shell-dispatch-global-mode 1)"
     (when agent-shell-dispatch-render-advice-target
       (advice-remove agent-shell-dispatch-render-advice-target
                      #'agent-shell-dispatch-render--extend-header))
-    (advice-remove 'shell-maker-finish-output
-                   #'agent-shell-dispatch--drain-queue)
     (advice-remove 'agent-shell-cycle-session-mode
                    #'agent-shell-dispatch--propagate-session-mode)
     (advice-remove 'agent-shell-set-session-mode

@@ -11,6 +11,12 @@
 (require 'map)
 (require 'agent-shell)
 (require 'agent-shell-ui)
+(require 'agent-shell-prompt-queue)
+
+(declare-function agent-shell--make-permission-button "agent-shell")
+(declare-function agent-shell--prompt-queue-enqueue "agent-shell-prompt-queue")
+(declare-function agent-shell--prompt-queue-process-next "agent-shell-prompt-queue")
+(declare-function shell-maker-busy "shell-maker")
 
 (defvar agent-shell-dispatch--primary-buffer)
 
@@ -119,7 +125,7 @@ Permission and input-needed messages override this with frame-based rendering."
             (save-restriction
               ;; Narrow to before the prompt so the fragment inserts above it.
               (when-let* ((proc (get-buffer-process (current-buffer)))
-                          ((not shell-maker--busy)))
+                          ((not (shell-maker-busy))))
                 (narrow-to-region (point-min)
                                   (save-excursion
                                     (goto-char (process-mark proc))
@@ -152,7 +158,7 @@ Permission and input-needed messages override this with frame-based rendering."
     (save-excursion
       (let ((inhibit-read-only t))
         (cond
-         (shell-maker--busy
+         ((shell-maker-busy)
           (goto-char (point-max))
           (insert text))
          ((when-let* ((proc (get-buffer-process (current-buffer))))
@@ -354,9 +360,9 @@ identify the dialog to remove on accept/reject."
           (lambda ()
             (interactive)
             (agent-shell-diff
-             :old (or old "")
-             :new (or new "")
-             :file file
+             :diffs (list (list (cons :old (or old ""))
+                                (cons :new (or new ""))
+                                (cons :file file)))
              :title (and file (file-name-nondirectory file))
              :on-accept (when accept-opt
                           (lambda ()
@@ -463,10 +469,10 @@ Queues a prompt so the dispatcher can review and mark the task done."
         (summary (agent-shell-dispatch-msg-task-completed-summary msg)))
     (when-let* ((buf (get-buffer target-buf)))
       (with-current-buffer buf
-        (agent-shell--enqueue-request
+        (agent-shell--prompt-queue-enqueue
          :prompt (format "[Task Complete: %s (task: %s)]\n\n%s" agent task-id summary))
-        (unless shell-maker--busy
-          (agent-shell--process-pending-request))))))
+        (unless (shell-maker-busy)
+          (agent-shell--prompt-queue-process-next))))))
 
 (cl-defmethod agent-shell-dispatch-msg-handle
   ((msg agent-shell-dispatch-msg-error) target-buf)
@@ -478,12 +484,12 @@ Queues a prompt so the dispatcher can update the task graph."
         (ctx (agent-shell-dispatch-msg-error-context msg)))
     (when-let* ((buf (get-buffer target-buf)))
       (with-current-buffer buf
-        (agent-shell--enqueue-request
+        (agent-shell--prompt-queue-enqueue
          :prompt (format "[Task Error: %s (task: %s)]\n\n%s%s"
                          agent task-id desc
                          (if ctx (format "\n\nContext: %s" ctx) "")))
-        (unless shell-maker--busy
-          (agent-shell--process-pending-request))))))
+        (unless (shell-maker-busy)
+          (agent-shell--prompt-queue-process-next))))))
 
 (cl-defmethod agent-shell-dispatch-msg-handle
   ((msg agent-shell-dispatch-msg-input-needed) target-buf)
@@ -496,13 +502,13 @@ Also tracks the agent as waiting for input."
       (with-current-buffer buf
         (let ((question (agent-shell-dispatch-msg-input-needed-question msg))
               (context (agent-shell-dispatch-msg-input-needed-context msg)))
-          (agent-shell--enqueue-request
+          (agent-shell--prompt-queue-enqueue
            :prompt (format "[Input Needed: %s]\n\n%s%s\n\nRespond via (agent-shell-dispatch-send-to-agent \"%s\" YOUR_ANSWER \"dispatcher\")"
                            agent question
                            (if context (format "\n\nContext: %s" context) "")
                            agent))
-          (unless shell-maker--busy
-            (agent-shell--process-pending-request)))))))
+          (unless (shell-maker-busy)
+            (agent-shell--prompt-queue-process-next)))))))
 
 (provide 'agent-shell-dispatch-messages)
 ;;; agent-shell-dispatch-messages.el ends here
