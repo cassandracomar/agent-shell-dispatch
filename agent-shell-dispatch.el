@@ -32,6 +32,11 @@
 ;; Forward declaration — defined by `define-globalized-minor-mode' below
 (defvar agent-shell-dispatch-global-mode)
 
+;; Dummy buffer-local minor mode variable/function for `define-globalized-minor-mode'
+(defvar agent-shell-dispatch--global-dummy nil)
+(defun agent-shell-dispatch--global-dummy (&rest _)
+  "No-op turn-on function for the globalized minor mode.")
+
 ;; ── Dispatcher structs ──────────────────────────────────────────────
 
 (cl-defstruct (agent-shell-dispatch-state
@@ -591,9 +596,6 @@ Enable in your config: (agent-shell-dispatch-global-mode 1)"
                    #'agent-shell-dispatch--propagate-session-mode)
     (remove-hook 'enable-theme-functions
                  #'agent-shell-dispatch-render--on-theme-change)))
-
-(defun agent-shell-dispatch--global-dummy (&rest _)
-  "No-op turn-on function for the globalized minor mode.")
 
 (provide 'agent-shell-dispatch)
 ;;; agent-shell-dispatch.el ends here
