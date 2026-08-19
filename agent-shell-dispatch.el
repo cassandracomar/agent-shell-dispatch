@@ -381,6 +381,77 @@ and none is selected."
     (with-current-buffer buf
       (agent-shell-dispatch-start (buffer-name buf) tasks interval))))
 
+;; ── Incremental graph mutation ─────────────────────────────────────────
+
+(defun agent-shell-dispatch--rebuild-render-ctx ()
+  "Rebuild the render context from current task list.
+Preserves all dispatch state (subscriptions, statuses, agents)."
+  (when-let* ((state agent-shell-dispatch--state)
+              (tasks (agent-shell-dispatch-state-tasks state))
+              (dispatcher-buffer (agent-shell-dispatch-state-dispatcher-buffer state)))
+    (let ((task-defs (mapcar (lambda (task)
+                               (agent-shell-dispatch-render-task-make
+                                :id (plist-get task :id)
+                                :name (plist-get task :name)
+                                :depends-on (plist-get task :depends-on)))
+                             tasks)))
+      (with-current-buffer (get-buffer dispatcher-buffer)
+        (agent-shell-dispatch-render-set-tasks task-defs)))))
+
+(defun agent-shell-dispatch-add-task (task)
+  "Add TASK to the active dispatch graph without restarting.
+TASK is a plist (:id ID :name NAME :depends-on (ID ...) :agent BUF).
+If a task with the same :id already exists, it is replaced.
+Returns non-nil on success."
+  (when-let* ((state agent-shell-dispatch--state))
+    (let* ((dispatcher-buffer (agent-shell-dispatch-state-dispatcher-buffer state))
+           (id (plist-get task :id))
+           (normalized (let ((agent (plist-get task :agent)))
+                         (if (stringp agent) task
+                           (plist-put (copy-sequence task) :agent dispatcher-buffer))))
+           (existing (agent-shell-dispatch-state-tasks state))
+           (filtered (cl-remove-if (lambda (t_) (equal (plist-get t_ :id) id)) existing)))
+      (setf (agent-shell-dispatch-state-tasks state) (append filtered (list normalized)))
+      (agent-shell-dispatch--rebuild-render-ctx)
+      t)))
+
+(defun agent-shell-dispatch-add-tasks (tasks)
+  "Add multiple TASKS to the active dispatch graph at once.
+Each element of TASKS follows the same format as `agent-shell-dispatch-add-task'.
+More efficient than calling add-task in a loop — rebuilds the render context once."
+  (when-let* ((state agent-shell-dispatch--state))
+    (let* ((dispatcher-buffer (agent-shell-dispatch-state-dispatcher-buffer state))
+           (existing (agent-shell-dispatch-state-tasks state))
+           (new-ids (mapcar (lambda (task) (plist-get task :id)) tasks))
+           (filtered (cl-remove-if (lambda (t_) (member (plist-get t_ :id) new-ids)) existing))
+           (normalized (mapcar (lambda (task)
+                                 (let ((agent (plist-get task :agent)))
+                                   (if (stringp agent) task
+                                     (plist-put (copy-sequence task) :agent dispatcher-buffer))))
+                               tasks)))
+      (setf (agent-shell-dispatch-state-tasks state) (append filtered normalized))
+      (agent-shell-dispatch--rebuild-render-ctx)
+      t)))
+
+(defun agent-shell-dispatch-remove-task (task-id)
+  "Remove the task with TASK-ID from the active dispatch graph.
+Also removes it from other tasks' :depends-on lists and clears its status.
+Returns non-nil if a task was removed."
+  (when-let* ((state agent-shell-dispatch--state))
+    (let* ((existing (agent-shell-dispatch-state-tasks state))
+           (found (cl-find-if (lambda (t_) (equal (plist-get t_ :id) task-id)) existing)))
+      (when found
+        (setf (agent-shell-dispatch-state-tasks state)
+              (mapcar (lambda (t_)
+                        (let ((deps (plist-get t_ :depends-on)))
+                          (if (member task-id deps)
+                              (plist-put (copy-sequence t_) :depends-on (remove task-id deps))
+                            t_)))
+                      (cl-remove-if (lambda (t_) (equal (plist-get t_ :id) task-id)) existing)))
+        (remhash task-id (agent-shell-dispatch-state-statuses state))
+        (agent-shell-dispatch--rebuild-render-ctx)
+        t))))
+
 
 (defun agent-shell-dispatch-stop ()
   "Stop rendering. State preserved for mode toggle."
