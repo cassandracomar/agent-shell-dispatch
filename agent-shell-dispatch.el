@@ -12,6 +12,7 @@
 (require 'map)
 (require 'agent-shell)
 (require 'agent-shell-prompt-queue)
+(require 'agent-shell-dispatch-state)
 (require 'agent-shell-dispatch-render)
 (require 'agent-shell-dispatch-messages)
 
@@ -22,10 +23,8 @@
 (declare-function agent-shell--update-header-and-mode-line "agent-shell")
 (declare-function agent-shell--make-permission-button "agent-shell")
 (declare-function agent-shell-subscribe-to "agent-shell")
-(declare-function agent-shell-unsubscribe "agent-shell")
 (declare-function agent-shell--prompt-queue-enqueue "agent-shell-prompt-queue")
 (declare-function agent-shell--prompt-queue-process-next "agent-shell-prompt-queue")
-(declare-function shell-maker-busy "shell-maker")
 (defvar agent-shell--state)
 (defvar agent-shell--header-cache)
 
@@ -37,39 +36,8 @@
 (defun agent-shell-dispatch--global-dummy (&rest _)
   "No-op turn-on function for the globalized minor mode.")
 
-;; ── Dispatcher structs ──────────────────────────────────────────────
-
-(cl-defstruct (agent-shell-dispatch-state
-               (:constructor agent-shell-dispatch-state-make)
-               (:copier nil))
-  "Active dispatch session state."
-  dispatcher-buffer tasks statuses agents turn-complete-subscription)
-
-(cl-defstruct (agent-shell-dispatch-agent-info
-               (:constructor agent-shell-dispatch-agent-info-make)
-               (:copier nil))
-  "Tracked agent with display name and activity state."
-  buffer name busy)
-
-(cl-defstruct (agent-shell-dispatch-reported-status
-               (:constructor agent-shell-dispatch-reported-status-make)
-               (:copier nil))
-  "Raw status report from an agent via MCP."
-  status detail updated)
-
-(cl-defstruct (agent-shell-dispatch-resolved-status
-               (:constructor agent-shell-dispatch-resolved-status-make)
-               (:copier nil))
-  "Computed effective status after inspecting agent buffer state."
-  effective detail)
 
 ;; -- Permission forwarding from background agents to dispatcher buffer --
-
-(defvar-local agent-shell-dispatch--primary-buffer nil
-  "Buffer name of the primary (dispatcher) shell for permission rendering.")
-
-(defvar-local agent-shell-dispatch--state nil
-  "Dispatch session state for this buffer.")
 
 (defun agent-shell-dispatch-forward-permission (permission)
   "Forward PERMISSION from a background agent via the messaging protocol."
@@ -86,13 +54,26 @@
 
 ;; -- Queue drain after response completion --
 
+(defun agent-shell-dispatch--prune-stale-permissions ()
+  "Remove entries from the pending permission list for idle agents.
+An agent blocked on permission is still busy (its turn is suspended).
+An idle agent's entry is stale — the permission was resolved or the
+agent was interrupted."
+  (setq agent-shell-dispatch-msg--pending-permission-agents
+        (seq-filter
+         (lambda (agent-buf)
+           (when-let* ((buf (get-buffer agent-buf)))
+             (with-current-buffer buf (shell-maker-busy))))
+         agent-shell-dispatch-msg--pending-permission-agents)))
+
 (defun agent-shell-dispatch--drain-queue (&rest _)
   "Process pending requests after a response completes.
-Safety net: if a message handler enqueued while the dispatcher was busy,
-this ensures the request is processed once the dispatcher goes idle."
+Flushes deferred permissions first, then processes the prompt queue."
   (when (and agent-shell-dispatch--state
              (derived-mode-p 'agent-shell-mode)
              (not (shell-maker-busy)))
+    (agent-shell-dispatch-msg-flush-deferred-permissions)
+    (agent-shell-dispatch--prune-stale-permissions)
     (let ((buf (current-buffer)))
       (run-with-idle-timer
        0.2 nil
@@ -130,34 +111,6 @@ Call from any buffer with active dispatch state."
                    (agent-shell-dispatch--propagate-mode-to-agents))))
     (apply orig-fn args)))
 
-;; -- Agent activity tracking --
-
-(defun agent-shell-dispatch--update-agent-activity ()
-  "Update busy state for all tracked agents via `shell-maker-busy'.
-Called each render frame from the dispatcher buffer."
-  (when-let* ((state agent-shell-dispatch--state)
-              (agents (agent-shell-dispatch-state-agents state)))
-    (maphash (lambda (_name info)
-               (let ((buf (get-buffer (agent-shell-dispatch-agent-info-buffer info))))
-                 (setf (agent-shell-dispatch-agent-info-busy info)
-                       (and buf
-                            (buffer-live-p buf)
-                            (with-current-buffer buf (shell-maker-busy))))))
-             agents)))
-
-(defun agent-shell-dispatch--get-agents ()
-  "Update busy states and return the agents hash for the renderer."
-  (agent-shell-dispatch--update-agent-activity)
-  (when-let* ((state agent-shell-dispatch--state))
-    (agent-shell-dispatch-state-agents state)))
-
-(defun agent-shell-dispatch-agent-buffer (name)
-  "Look up the full buffer name for agent with display NAME.
-Returns the buffer name string, or nil if not found."
-  (when-let* ((state agent-shell-dispatch--state)
-              (agents (agent-shell-dispatch-state-agents state))
-              (info (gethash name agents)))
-    (agent-shell-dispatch-agent-info-buffer info)))
 
 ;; -- Dispatch task graph and progress rendering --
 
@@ -227,24 +180,6 @@ approval or control buffer rather than the shell that initiated the request."
   "Return the name of `agent-shell-dispatch-current-agent-buffer'."
   (buffer-name (agent-shell-dispatch-current-agent-buffer buffer)))
 
-(defun agent-shell-dispatch--clear-state ()
-  "Clear dispatch state and unsubscribe from events. Used as teardown hook."
-  (when-let* ((state agent-shell-dispatch--state)
-              (token (agent-shell-dispatch-state-turn-complete-subscription state)))
-    (ignore-errors (agent-shell-unsubscribe :subscription token)))
-  (setq agent-shell-dispatch--state nil))
-
-
-(defun agent-shell-dispatch--record-report (task-id status &optional detail)
-  "Record STATUS for TASK-ID in the current dispatch buffer."
-  (when-let* ((state agent-shell-dispatch--state)
-              (statuses (agent-shell-dispatch-state-statuses state)))
-    (puthash task-id
-             (agent-shell-dispatch-reported-status-make
-              :status (intern status)
-              :detail detail
-              :updated (current-time))
-             statuses)))
 
 (defun agent-shell-dispatch-report (task-id status &optional detail)
   "Report STATUS for TASK-ID. Called by agents via MCP.
@@ -257,27 +192,6 @@ DETAIL is an optional description of current activity."
 
 
 
-(defun agent-shell-dispatch--resolve-status (task statuses)
-  "Determine effective status for TASK given STATUSES hash.
-Returns a agent-shell-dispatch-resolved-status struct.
-Status is driven by explicit reports via `agent-shell-dispatch-report'.
-Tasks without a report are `not-started'."
-  (let* ((id (plist-get task :id))
-         (agent-buf (plist-get task :agent))
-         (buf (get-buffer agent-buf))
-         (alive (and buf (get-buffer-process buf)))
-         (reported (gethash id statuses))
-         (rep-status (and reported (agent-shell-dispatch-reported-status-status reported)))
-         (rep-detail (and reported (agent-shell-dispatch-reported-status-detail reported)))
-         (effective (cond
-                     ((eq rep-status 'done) 'done)
-                     ((eq rep-status 'error) 'error)
-                     ((eq rep-status 'working)
-                      (if (not alive) 'dead 'working))
-                     (t 'not-started))))
-    (agent-shell-dispatch-resolved-status-make
-     :effective effective
-     :detail (and rep-detail (memq effective '(working permission)) rep-detail))))
 
 
 (defun agent-shell-dispatch--build-status-map ()
@@ -314,6 +228,19 @@ Returns a hash of id → `agent-shell-dispatch-render-task-status', or nil."
               (let ((ts (gethash active-id sm)))
                 (setf (agent-shell-dispatch-render-task-status-status ts) 'permission))))))
       sm)))
+
+(defun agent-shell-dispatch--render-agents ()
+  "Return a list of `agent-shell-dispatch-render-agent' structs for the renderer.
+Translates internal agent-info to the renderer's protocol type."
+  (when-let* ((agents (agent-shell-dispatch--get-agents)))
+    (let (result)
+      (maphash (lambda (_name info)
+                 (push (agent-shell-dispatch-render-agent-make
+                        :name (agent-shell-dispatch-agent-info-name info)
+                        :busy (agent-shell-dispatch-agent-info-busy info))
+                       result))
+               agents)
+      result)))
 
 (defun agent-shell-dispatch-start (dispatcher-buffer tasks &optional _interval)
   "Start the dispatch task graph in the `agent-shell' header.
@@ -355,7 +282,7 @@ TASKS is a list of plists: ((:id ID :name NAME :agent AGENT-BUF) ...)."
     (agent-shell-dispatch-render-set-tasks task-defs)
     (setq agent-shell-dispatch-render-buffer dispatcher-buffer
           agent-shell-dispatch-render-status-function #'agent-shell-dispatch--build-status-map
-          agent-shell-dispatch-render-agent-activity-function #'agent-shell-dispatch--get-agents
+          agent-shell-dispatch-render-agent-activity-function #'agent-shell-dispatch--render-agents
           agent-shell-dispatch-render-header-function #'agent-shell--update-header-and-mode-line
           agent-shell-dispatch-render-reset-function (lambda ()
                                                        (when (boundp 'agent-shell--header-cache)
@@ -509,7 +436,7 @@ No window popup, no session prompt.  Copies the session mode from the
 primary (dispatcher) buffer.  Permissions are rendered in the dispatcher buffer.
 BUFFER-NAME, if provided, is incorporated into the buffer label."
   (let* ((cfg (copy-alist config))
-         (primary agent-shell-dispatch--primary-buffer)
+         (primary (or agent-shell-dispatch--primary-buffer (buffer-name)))
          (mode-id (or (when-let* ((pbuf (and primary (get-buffer primary))))
                         (with-current-buffer pbuf
                           (map-nested-elt agent-shell--state '(:session :mode-id))))

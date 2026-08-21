@@ -41,6 +41,17 @@
 (defvar-local agent-shell-dispatch-wayfinder--known-ids nil
   "Set of ticket IDs currently in the dispatch graph.")
 
+(defvar-local agent-shell-dispatch-wayfinder--file-watcher nil
+  "File-notify descriptor for the local backend's issues directory.")
+
+(defvar-local agent-shell-dispatch-wayfinder--poll-timer nil
+  "Timer for periodic refresh (used by the github backend).")
+
+(defcustom agent-shell-dispatch-wayfinder-poll-interval 5.0
+  "Seconds between GitHub backend poll refreshes."
+  :type 'number
+  :group 'agent-shell-dispatch)
+
 ;; ── Normalized ticket format ───────────────────────────────────────────
 ;;
 ;; Both backends produce tickets as plists:
@@ -178,7 +189,7 @@ Uses `gh issue list` to find child tickets. Returns normalized ticket list."
   "Map TICKET's tracker status to a dispatch status string."
   (pcase (plist-get ticket :status)
     ("resolved" "done")
-    ("claimed"  "working")
+    ("claimed"  "claimed")
     (_          "waiting")))
 
 ;; ── Graph construction ─────────────────────────────────────────────────
@@ -195,7 +206,8 @@ Uses `gh issue list` to find child tickets. Returns normalized ticket list."
 (defun agent-shell-dispatch-wayfinder--ticket-to-task (ticket)
   "Convert a single TICKET plist to a dispatch task plist."
   (list :id (plist-get ticket :id)
-        :name (format "[%s] %s"
+        :name (format "%s [%s] %s"
+                      (plist-get ticket :id)
                       (agent-shell-dispatch-wayfinder--type-icon
                        (plist-get ticket :type))
                       (plist-get ticket :name))
@@ -208,10 +220,20 @@ Uses `gh issue list` to find child tickets. Returns normalized ticket list."
 ;; ── Sync logic ─────────────────────────────────────────────────────────
 
 (defun agent-shell-dispatch-wayfinder--sync-statuses (tickets)
-  "Report dispatch statuses for all TICKETS based on their tracker state."
+  "Report dispatch statuses for all TICKETS based on their tracker state.
+Does not downgrade a ticket already reported as \"working\" — the spawned
+agent's liveness takes precedence over the file's \"claimed\" state."
   (dolist (ticket tickets)
-    (let ((status (agent-shell-dispatch-wayfinder--ticket-dispatch-status ticket)))
-      (agent-shell-dispatch-report (plist-get ticket :id) status))))
+    (let* ((id (plist-get ticket :id))
+           (status (agent-shell-dispatch-wayfinder--ticket-dispatch-status ticket))
+           (state agent-shell-dispatch--state)
+           (existing (and state
+                         (gethash id (agent-shell-dispatch-state-statuses state))))
+           (existing-status (and existing
+                                 (agent-shell-dispatch-reported-status-status existing))))
+      (unless (and (eq existing-status 'working)
+                   (equal status "claimed"))
+        (agent-shell-dispatch-report id status)))))
 
 (defun agent-shell-dispatch-wayfinder--diff-and-apply (tickets)
   "Compute the diff between current graph and TICKETS, apply incrementally.
@@ -244,6 +266,89 @@ Adds new tickets, removes gone tickets, updates edges on changed tickets."
     ;; Update known set
     (setq agent-shell-dispatch-wayfinder--known-ids new-ids)))
 
+;; ── Auto-refresh ──────────────────────────────────────────────────────
+
+(defun agent-shell-dispatch-wayfinder--auto-refresh (_event)
+  "Handle a file-notify EVENT by refreshing the dispatch graph."
+  (ignore-errors (agent-shell-dispatch-wayfinder-refresh)))
+
+(defun agent-shell-dispatch-wayfinder--start-watching (effort backend)
+  "Start auto-refresh for EFFORT using BACKEND.
+Local backend uses file-notify; github uses a poll timer."
+  (agent-shell-dispatch-wayfinder--stop-watching)
+  (pcase backend
+    ('local
+     (let ((issues-dir (expand-file-name
+                        "issues"
+                        (agent-shell-dispatch-wayfinder--local-effort-dir effort))))
+       (when (file-directory-p issues-dir)
+         (setq agent-shell-dispatch-wayfinder--file-watcher
+               (file-notify-add-watch
+                issues-dir '(change attribute-change)
+                #'agent-shell-dispatch-wayfinder--auto-refresh)))))
+    ('github
+     (let ((buf (current-buffer)))
+       (setq agent-shell-dispatch-wayfinder--poll-timer
+             (run-with-timer
+              agent-shell-dispatch-wayfinder-poll-interval
+              agent-shell-dispatch-wayfinder-poll-interval
+              (lambda ()
+                (when (buffer-live-p buf)
+                  (ignore-errors (agent-shell-dispatch-wayfinder-refresh))))))))))
+
+(defun agent-shell-dispatch-wayfinder--stop-watching ()
+  "Stop any active file watcher or poll timer."
+  (when agent-shell-dispatch-wayfinder--file-watcher
+    (file-notify-rm-watch agent-shell-dispatch-wayfinder--file-watcher)
+    (setq agent-shell-dispatch-wayfinder--file-watcher nil))
+  (when agent-shell-dispatch-wayfinder--poll-timer
+    (cancel-timer agent-shell-dispatch-wayfinder--poll-timer)
+    (setq agent-shell-dispatch-wayfinder--poll-timer nil)))
+
+;; ── Ticket mutation ────────────────────────────────────────────────────
+
+(defun agent-shell-dispatch-wayfinder--local-find-file (effort id)
+  "Return the absolute path of ticket ID within EFFORT, or nil."
+  (let* ((issues-dir (expand-file-name
+                      "issues"
+                      (agent-shell-dispatch-wayfinder--local-effort-dir effort)))
+         (files (when (file-directory-p issues-dir)
+                  (directory-files issues-dir t "\\`[0-9]+-.*\\.md\\'"))))
+    (cl-find-if
+     (lambda (f)
+       (let ((basename (file-name-nondirectory f)))
+         (and (string-match "\\`\\([0-9]+\\)-" basename)
+              (equal (replace-regexp-in-string "^0+" "" (match-string 1 basename))
+                     (replace-regexp-in-string "^0+" "" id)))))
+     files)))
+
+(defun agent-shell-dispatch-wayfinder--local-set-status (file status)
+  "Set STATUS in the frontmatter of ticket FILE."
+  (with-temp-buffer
+    (insert-file-contents file)
+    (goto-char (point-min))
+    (if (re-search-forward "^Status:\\s-*.*$" nil t)
+        (replace-match (format "Status: %s" status))
+      (goto-char (point-min))
+      (end-of-line)
+      (insert (format "\nStatus: %s" status)))
+    (write-region (point-min) (point-max) file nil 'silent)))
+
+(defun agent-shell-dispatch-wayfinder--local-ticket-body (file)
+  "Extract the body text (below the heading) from ticket FILE."
+  (with-temp-buffer
+    (insert-file-contents file)
+    (goto-char (point-min))
+    (if (re-search-forward "^# " nil t)
+        (let ((start (line-beginning-position 2)))
+          (string-trim (buffer-substring-no-properties start (point-max))))
+      (string-trim (buffer-substring-no-properties (point-min) (point-max))))))
+
+(defun agent-shell-dispatch-wayfinder--github-claim-ticket (id)
+  "Assign the current user to GitHub issue ID, marking it claimed."
+  (let ((cmd (format "gh issue edit %s --add-assignee @me 2>/dev/null" id)))
+    (shell-command-to-string cmd)))
+
 ;; ── Public API ─────────────────────────────────────────────────────────
 
 (defun agent-shell-dispatch-wayfinder--dispatch-buffer ()
@@ -267,7 +372,8 @@ BACKEND is `local' (default) or `github'."
       (setq agent-shell-dispatch-wayfinder--effort effort
             agent-shell-dispatch-wayfinder--backend be
             agent-shell-dispatch-wayfinder--known-ids ids)
-      (agent-shell-dispatch-wayfinder--sync-statuses tickets))
+      (agent-shell-dispatch-wayfinder--sync-statuses tickets)
+      (agent-shell-dispatch-wayfinder--start-watching effort be))
     (message "Wayfinder: loaded %d tickets from %s (%s)" (length tickets) effort be)))
 
 (defun agent-shell-dispatch-wayfinder-refresh ()
@@ -292,10 +398,77 @@ and syncs all statuses. Call after any ticket state change."
   (interactive)
   (when-let* ((buf (agent-shell-dispatch-wayfinder--dispatch-buffer)))
     (with-current-buffer buf
+      (agent-shell-dispatch-wayfinder--stop-watching)
       (agent-shell-dispatch-stop)
       (setq agent-shell-dispatch-wayfinder--effort nil
             agent-shell-dispatch-wayfinder--backend nil
             agent-shell-dispatch-wayfinder--known-ids nil))))
+
+(defun agent-shell-dispatch-wayfinder-start-ticket (id &optional message)
+  "Claim ticket ID, spawn an agent for it, and mark it working.
+MESSAGE overrides the default initial prompt (the ticket body).
+Requires an active wayfinder effort."
+  (interactive "sTicket ID: ")
+  (let ((buf (agent-shell-dispatch-wayfinder--dispatch-buffer)))
+    (unless buf
+      (user-error "No dispatch buffer found"))
+    (with-current-buffer buf
+      (unless agent-shell-dispatch-wayfinder--effort
+        (user-error "No wayfinder effort loaded"))
+      (let* ((effort agent-shell-dispatch-wayfinder--effort)
+             (backend agent-shell-dispatch-wayfinder--backend)
+             (id-normalized (replace-regexp-in-string "^0+" "" id))
+             (ticket (cl-find-if
+                      (lambda (t_) (equal (plist-get t_ :id) id-normalized))
+                      (agent-shell-dispatch-wayfinder--scan-tickets effort backend))))
+        (unless ticket
+          (user-error "Ticket %s not found in effort %s" id effort))
+        (when (equal (plist-get ticket :status) "resolved")
+          (user-error "Ticket %s is already resolved" id))
+        ;; Claim in the tracker
+        (pcase backend
+          ('local
+           (when-let* ((file (agent-shell-dispatch-wayfinder--local-find-file effort id)))
+             (agent-shell-dispatch-wayfinder--local-set-status file "claimed")))
+          ('github
+           (agent-shell-dispatch-wayfinder--github-claim-ticket id-normalized)))
+        ;; Ensure the graph is rendered (idempotent if already active)
+        (unless agent-shell-dispatch-render-mode
+          (let ((tasks (agent-shell-dispatch-wayfinder--tickets-to-tasks
+                        (agent-shell-dispatch-wayfinder--scan-tickets effort backend))))
+            (agent-shell-dispatch-start-current tasks)))
+        ;; Build the initial message for the agent
+        (let* ((name (plist-get ticket :name))
+               (agent-name
+                (pcase backend
+                  ('local
+                   (when-let* ((file (agent-shell-dispatch-wayfinder--local-find-file effort id)))
+                     (file-name-sans-extension (file-name-nondirectory file))))
+                  (_ (format "%s-%s"
+                             id-normalized
+                             (replace-regexp-in-string "[^a-z0-9]+" "-"
+                                                      (downcase name))))))
+               (body (pcase backend
+                       ('local
+                        (when-let* ((file (agent-shell-dispatch-wayfinder--local-find-file effort id)))
+                          (agent-shell-dispatch-wayfinder--local-ticket-body file)))
+                       (_ nil)))
+               (prompt (or message
+                           (format "Work on: %s\n\n%s" name (or body "")))))
+          ;; Spawn the agent and wire it to this task
+          (let ((agent-buf (agent-shell-dispatch-spawn-agent default-directory agent-name prompt)))
+            (when agent-buf
+              (setq agent-shell-dispatch-msg--pending-permission-agents
+                    (delete agent-buf agent-shell-dispatch-msg--pending-permission-agents))
+              (when-let* ((state agent-shell-dispatch--state)
+                          (task (cl-find-if
+                                 (lambda (t_) (equal (plist-get t_ :id) id-normalized))
+                                 (agent-shell-dispatch-state-tasks state))))
+                (plist-put task :agent agent-buf))))
+          ;; Report working and refresh
+          (agent-shell-dispatch-report id-normalized "working")
+          (agent-shell-dispatch-wayfinder-refresh)
+          (message "Wayfinder: started ticket %s — %s" id-normalized name))))))
 
 (provide 'agent-shell-dispatch-wayfinder)
 ;;; agent-shell-dispatch-wayfinder.el ends here

@@ -1,4 +1,5 @@
 ;;; agent-shell-dispatch-render.el --- SVG task-graph renderer -*- lexical-binding: t; -*-
+;; box-test
 
 ;;; Commentary:
 
@@ -15,11 +16,6 @@
 ;; Forward declarations for buffer-local variables defined later
 (defvar agent-shell-dispatch-render-buffer)
 
-;; Cross-file struct accessors and functions (from agent-shell-dispatch.el)
-(declare-function agent-shell-dispatch-agent-info-name "agent-shell-dispatch" (info))
-(declare-function agent-shell-dispatch-agent-info-busy "agent-shell-dispatch" (info))
-(declare-function agent-shell-dispatch-global-mode "agent-shell-dispatch" (&optional arg))
-
 ;; ── Color blending (replaces doom-blend) ────────────────────────────
 
 (defun agent-shell-dispatch-render--blend-colors (color1 color2 alpha)
@@ -33,6 +29,14 @@ ALPHA=1.0 returns COLOR1, ALPHA=0.0 returns COLOR2."
                    '(2)))))
 
 ;; ── Structs ─────────────────────────────────────────────────────────
+
+(cl-defstruct (agent-shell-dispatch-render-agent
+               (:constructor agent-shell-dispatch-render-agent-make)
+               (:copier nil))
+  "Agent display data for the renderer.
+This is the renderer's protocol type — callers produce these,
+the renderer never reaches into dispatch internals."
+  name busy)
 
 (cl-defstruct (agent-shell-dispatch-render-status-style
                (:constructor agent-shell-dispatch-render-status-style-make)
@@ -170,8 +174,8 @@ Derived at runtime via `agent-shell-dispatch-render--derived-layout':
 ;; ── Spinner ─────────────────────────────────────────────────────────
 
 (defvar agent-shell-dispatch-render--spinner-frames
-  '("⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏")
-  "Braille spinner animation frames.")
+  '("◐" "◓" "◑" "◒")
+  "Quarter-circle spinner animation frames.")
 
 (defvar agent-shell-dispatch-render--spinner-index 0
   "Current spinner frame index.")
@@ -263,6 +267,8 @@ Respects face remapping (e.g. `solaire-mode') in the dispatcher buffer."
                                 :bg (agent-shell-dispatch-render--blend-colors wrn bg tint) :fg wrn :icon "⠹"))
              (cons 'permission (agent-shell-dispatch-render-status-style-make
                                 :bg (agent-shell-dispatch-render--blend-colors err bg tint) :fg err :icon "🔒"))
+             (cons 'claimed    (agent-shell-dispatch-render-status-style-make
+                                :bg (agent-shell-dispatch-render--blend-colors wrn bg 0.15) :fg wrn :icon "◑"))
              (cons 'waiting    (agent-shell-dispatch-render-status-style-make
                                 :bg (agent-shell-dispatch-render--blend-colors dim bg 0.1)  :fg dim :icon "◦"))
              (cons 'error      (agent-shell-dispatch-render-status-style-make
@@ -592,8 +598,9 @@ Calibrated against actual librsvg rendering via the theme's correction factor."
 
 (defun agent-shell-dispatch-render--agent-layout (agents h theme)
   "Compute per-column layout for agent activity display.
+AGENTS is a list of `agent-shell-dispatch-render-agent' structs.
 Returns a plist (:total-w WIDTH :columns COLS :per-col N :sorted LIST).
-Each entry in COLS is (:x X :w W :agents LIST-OF-INFO)."
+Each entry in COLS is (:x X :w W :agents LIST-OF-AGENT)."
   (let* ((L (agent-shell-dispatch-render--derived-layout))
          (font (agent-shell-dispatch-render-theme-font theme))
          (font-size (plist-get L :node-font-size))
@@ -601,11 +608,10 @@ Each entry in COLS is (:x X :w W :agents LIST-OF-INFO)."
          (row-h (plist-get L :agent-row-h))
          (col-gap (plist-get L :agent-col-gap))
          (avail-h (- h (plist-get L :agent-margin)))
-         (sorted (let (entries)
-                   (maphash (lambda (_buf info) (push info entries)) agents)
-                   (sort entries (lambda (a b)
-                                   (string< (agent-shell-dispatch-agent-info-name a)
-                                            (agent-shell-dispatch-agent-info-name b))))))
+         (sorted (sort (copy-sequence agents)
+                       (lambda (a b)
+                         (string< (agent-shell-dispatch-render-agent-name a)
+                                  (agent-shell-dispatch-render-agent-name b)))))
          (n (length sorted))
          (per-col (max 1 (floor avail-h row-h)))
          (cols nil)
@@ -615,7 +621,7 @@ Each entry in COLS is (:x X :w W :agents LIST-OF-INFO)."
              for col-agents = (seq-subseq sorted start (min (+ start per-col) n))
              for max-pw = (cl-loop for info in col-agents
                                    maximize (agent-shell-dispatch-render--text-pixel-width
-                                             (agent-shell-dispatch-agent-info-name info)
+                                             (agent-shell-dispatch-render-agent-name info)
                                              font font-size))
              for w = (+ (* 2 pad-x) max-pw)
              do (push (list :x cur-x :w w :agents col-agents) cols)
@@ -625,11 +631,13 @@ Each entry in COLS is (:x X :w W :agents LIST-OF-INFO)."
           :per-col per-col)))
 
 (defun agent-shell-dispatch-render--agent-column-width (agents h theme)
-  "Compute total pixel width needed for the agent column(s)."
+  "Compute total pixel width needed for the agent column(s).
+AGENTS is a list of `agent-shell-dispatch-render-agent' structs."
   (plist-get (agent-shell-dispatch-render--agent-layout agents h theme) :total-w))
 
 (defun agent-shell-dispatch-render--draw-agent-column (svg agents x h theme)
   "Draw agent activity indicators as labeled boxes on SVG at X.
+AGENTS is a list of `agent-shell-dispatch-render-agent' structs.
 Filled box = busy, hollow box = idle. Per-column width fits tightest name."
   (let* ((L (agent-shell-dispatch-render--derived-layout))
          (font (agent-shell-dispatch-render-theme-font theme))
@@ -650,10 +658,10 @@ Filled box = busy, hollow box = idle. Per-column width fits tightest name."
              (col-count (length col-agents))
              (total-col-h (* row-h col-count))
              (start-y (/ (- h total-col-h) 2)))
-        (cl-loop for info in col-agents
+        (cl-loop for agent in col-agents
                  for row from 0
-                 for name = (agent-shell-dispatch-agent-info-name info)
-                 for busy = (agent-shell-dispatch-agent-info-busy info)
+                 for name = (agent-shell-dispatch-render-agent-name agent)
+                 for busy = (agent-shell-dispatch-render-agent-busy agent)
                  for by = (+ start-y (* row row-h) (/ (- row-h box-h) 2))
                  for text-y = (+ by (/ box-h 2) (agent-shell-dispatch-render--baseline-offset font-size))
                  do (if busy
@@ -936,7 +944,7 @@ Returns a render-ctx for `agent-shell-dispatch-render-draw'."
   "Draw SVG from cached CTX with STATUS-MAP and AGENTS.
 CTX is from `agent-shell-dispatch-render-prepare'.
 STATUS-MAP maps task-id to render-task-status.
-AGENTS maps buffer-name to agent-info."
+AGENTS is a list of `agent-shell-dispatch-render-agent' structs."
   (let* ((L (agent-shell-dispatch-render--derived-layout))
          (theme (agent-shell-dispatch-render--theme-colors))
          (topo (agent-shell-dispatch-render-ctx-topo ctx))
@@ -946,7 +954,7 @@ AGENTS maps buffer-name to agent-info."
          (node-positions (agent-shell-dispatch-render-ctx-node-positions ctx))
          (leveled (agent-shell-dispatch-render-topology-leveled topo))
          ;; Compute agent column width first (tight padding)
-         (agent-col-w (if (and agents (> (hash-table-count agents) 0))
+         (agent-col-w (if agents
                           (+ (agent-shell-dispatch-render--agent-column-width agents h theme) 8)
                         0))
          (svg (svg-create (+ w agent-col-w) h)))
@@ -1034,12 +1042,16 @@ DISPATCHER-BUF is the buffer name."
   svg-str)
 
 (defun agent-shell-dispatch-render-cycle-spinner ()
-  "Advance the spinner frame and update the working icon."
+  "Advance the spinner frame and update working/claimed icons."
   (cl-incf agent-shell-dispatch-render--spinner-index)
-  (setf (agent-shell-dispatch-render-status-style-icon
-         (cdr (assq 'working (agent-shell-dispatch-render-theme-status (agent-shell-dispatch-render--theme-colors)))))
-        (nth (% agent-shell-dispatch-render--spinner-index (length agent-shell-dispatch-render--spinner-frames))
-             agent-shell-dispatch-render--spinner-frames)))
+  (let ((frame (nth (% agent-shell-dispatch-render--spinner-index
+                       (length agent-shell-dispatch-render--spinner-frames))
+                    agent-shell-dispatch-render--spinner-frames))
+        (theme (agent-shell-dispatch-render-theme-status
+                (agent-shell-dispatch-render--theme-colors))))
+    (setf (agent-shell-dispatch-render-status-style-icon (cdr (assq 'working theme))) frame)
+    (when-let* ((claimed-style (cdr (assq 'claimed theme))))
+      (setf (agent-shell-dispatch-render-status-style-icon claimed-style) frame))))
 
 ;; ── Header integration ─────────────────────────────────────────────
 ;;
@@ -1062,7 +1074,7 @@ DISPATCHER-BUF is the buffer name."
 Called every frame by the header renderer.")
 
 (defvar-local agent-shell-dispatch-render-agent-activity-function nil
-  "Function of no args returning the agents hash (buffer-name -> agent-info).
+  "Function of no args returning a list of `agent-shell-dispatch-render-agent' structs.
 Called every frame to render the agent activity column.")
 
 (defvar-local agent-shell-dispatch-render-header-function nil
@@ -1140,9 +1152,6 @@ Requires `agent-shell-dispatch-render-global-mode' for the advice."
   (if agent-shell-dispatch-render-mode
       (if (null agent-shell-dispatch-render--ctx)
           (setq agent-shell-dispatch-render-mode nil)
-        ;; Auto-enable global mode if not already on
-        (unless (bound-and-true-p agent-shell-dispatch-global-mode)
-          (agent-shell-dispatch-global-mode 1))
         ;; Buffer-local heartbeat timer
         (let ((buf (current-buffer)))
           (setq agent-shell-dispatch-render--heartbeat-timer

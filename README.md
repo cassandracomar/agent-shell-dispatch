@@ -178,17 +178,50 @@ The bridge handles:
 
 ## Architecture
 
-The package is split into three modules:
+The package is split into five modules:
 
 | Module | Purpose |
 |--------|---------|
-| `agent-shell-dispatch.el` | Agent lifecycle, status resolution, spawn/send/kill coordination |
+| `agent-shell-dispatch.el` | Agent lifecycle, spawn/send/kill coordination, incremental graph mutation, global mode |
+| `agent-shell-dispatch-state.el` | Core data structures (session state, agent info, status structs), pure status resolution, buffer-local state variables |
 | `agent-shell-dispatch-messages.el` | Typed messaging protocol between sub-agents and dispatcher (permissions, progress, errors, input requests, completions) |
 | `agent-shell-dispatch-render.el` | Pure SVG task-graph renderer -- topology, geometry, theme-aware drawing, viewport panning |
+| `agent-shell-dispatch-wayfinder.el` | Bridge between wayfinder efforts and the dispatch graph -- reads tickets from local markdown or GitHub Issues, maps blocking edges to DAG dependencies, incremental sync |
+
+Module boundaries:
+
+- **state** defines all structs (`agent-shell-dispatch-state`, `agent-shell-dispatch-agent-info`, `agent-shell-dispatch-reported-status`, `agent-shell-dispatch-resolved-status`) and owns status resolution logic. Pure -- no side effects beyond the hash table it's given.
+- **render** is pure -- no knowledge of agents, processes, or dispatch lifecycle. It receives resolved task data and produces SVGs. The dispatcher injects callbacks via hook variables.
+- **messages** owns the typed protocol and UI rendering for inter-agent communication. Permission forwarding, deferred queuing, and fragment management live here.
+- **dispatch** owns agent lifecycle and wires state, render, and messages together. It manages subscriptions and exposes the public mutation API (`add-task`, `add-tasks`, `remove-task`, `report`).
+- **wayfinder** is an optional bridge layer that maps external ticket state into dispatch primitives. It depends on dispatch but nothing depends on it.
 
 All dispatch and render state is buffer-local, so multiple independent dispatch sessions can run concurrently in separate agent-shell buffers.
 
 ## API Reference
+
+### Dispatch lifecycle
+
+| Function | Description |
+|----------|-------------|
+| `agent-shell-dispatch-start` | Register tasks and start the SVG task graph |
+| `agent-shell-dispatch-start-current` | Start the SVG task graph in the current request's agent-shell buffer |
+| `agent-shell-dispatch-stop` | Stop rendering (state preserved for toggle) |
+| `agent-shell-dispatch-report` | Report task status (`working`, `done`, `error`) -- dispatcher only |
+| `agent-shell-dispatch-current-agent-buffer` | Resolve the agent-shell buffer associated with an MCP/eval request |
+| `agent-shell-dispatch-current-agent-buffer-name` | Like above, but returns the buffer name string |
+| `agent-shell-dispatch-global-mode` | Global minor mode -- installs all advice (render, queue drain, mode propagation) |
+| `agent-shell-dispatch-render-mode` | Buffer-local minor mode -- manages heartbeat timer |
+
+### Graph mutation
+
+| Function | Description |
+|----------|-------------|
+| `agent-shell-dispatch-add-task` | Add or replace a single task node without restarting |
+| `agent-shell-dispatch-add-tasks` | Batch-add multiple task nodes (single render rebuild) |
+| `agent-shell-dispatch-remove-task` | Remove a task node and clean up dangling edges |
+
+### Agent coordination
 
 | Function | Description |
 |----------|-------------|
@@ -197,22 +230,18 @@ All dispatch and render state is buffer-local, so multiple independent dispatch 
 | `agent-shell-dispatch-list-agents` | List active dispatch agent buffers with status |
 | `agent-shell-dispatch-view-agent` | View recent output from one agent |
 | `agent-shell-dispatch-view-all-agents` | View recent output from all agents |
-| `agent-shell-dispatch-start` | Register tasks and start the SVG task graph |
-| `agent-shell-dispatch-start-current` | Start the SVG task graph in the current request's agent-shell buffer |
-| `agent-shell-dispatch-current-agent-buffer-name` | Resolve the agent-shell buffer name associated with an MCP/eval request |
-| `agent-shell-dispatch-stop` | Stop rendering (state preserved for toggle) |
-| `agent-shell-dispatch-report` | Report task status -- dispatcher only |
-| `agent-shell-dispatch-add-task` | Add or replace a single task node without restarting |
-| `agent-shell-dispatch-add-tasks` | Batch-add multiple task nodes (single render rebuild) |
-| `agent-shell-dispatch-remove-task` | Remove a task node and clean up dangling edges |
 | `agent-shell-dispatch-agent-buffer` | Look up full buffer name from short agent name |
 | `agent-shell-dispatch-interrupt-agent` | Interrupt a running agent |
 | `agent-shell-dispatch-kill-agents` | Kill all dispatch agents and stop rendering |
-| `agent-shell-dispatch-global-mode` | Global minor mode -- installs all advice (render, queue drain, mode propagation) |
-| `agent-shell-dispatch-render-mode` | Buffer-local minor mode -- manages heartbeat timer |
+
+### Wayfinder bridge
+
+| Function | Description |
+|----------|-------------|
 | `agent-shell-dispatch-wayfinder-load` | Parse a wayfinder effort and start dispatch with its task graph |
 | `agent-shell-dispatch-wayfinder-refresh` | Incrementally sync the graph from the tracker (add/remove/update) |
 | `agent-shell-dispatch-wayfinder-unload` | Stop dispatch and clear wayfinder state |
+| `agent-shell-dispatch-wayfinder-start-ticket` | Claim a ticket, spawn an agent for it, and mark it working |
 
 ## License
 

@@ -14,11 +14,17 @@
 (require 'agent-shell-prompt-queue)
 
 (declare-function agent-shell--make-permission-button "agent-shell")
+(declare-function agent-shell--update-fragment "agent-shell")
+(declare-function agent-shell--live-input-prompt-p "agent-shell")
+(declare-function agent-shell-chat--schedule-relabel "agent-shell-chat-mode")
 (declare-function agent-shell--prompt-queue-enqueue "agent-shell-prompt-queue")
 (declare-function agent-shell--prompt-queue-process-next "agent-shell-prompt-queue")
 (declare-function shell-maker-busy "shell-maker")
 
+(defvar comint-last-prompt)
+
 (defvar agent-shell-dispatch--primary-buffer)
+(defvar agent-shell--state)
 
 ;; ── Base struct ─────────────────────────────────────────────────────
 
@@ -102,6 +108,15 @@ When nil the fragment displays flat; when non-nil it is collapsible."
 
 (defvar agent-shell-dispatch-msg--block-counter 0
   "Counter for generating unique dispatch fragment block IDs.")
+
+(defvar agent-shell-dispatch-msg--current-block-id nil
+  "Dynamically bound block-id during permission rendering.
+Shared between `--send-permission-now' and `msg-render' so the
+respond action can delete the correct fragment.")
+
+(defvar agent-shell-dispatch-msg--current-target-buf nil
+  "Dynamically bound target buffer name during permission rendering.
+The dispatcher buffer where the fragment lives.")
 
 (cl-defgeneric agent-shell-dispatch-msg-send (msg target-buf)
   "Send MSG to TARGET-BUF as a collapsible UI fragment.
@@ -283,28 +298,26 @@ Errors stay visible, not collapsed."
 (defvar agent-shell-dispatch-msg--pending-permission-agents nil
   "List of agent buffer names with unresolved permission dialogs.")
 
+(defvar agent-shell-dispatch-msg--deferred-permissions nil
+  "List of (MSG . TARGET-BUF) cons cells awaiting idle rendering.
+Permissions that arrive while the dispatcher is busy are queued here
+and rendered on the next turn-complete.")
+
+
 (defvar agent-shell-dispatch-msg--pending-input-agents nil
   "List of agent buffer names waiting for dispatcher input.")
 
 (defun agent-shell-dispatch-msg--cleanup-permission
-    (perm-id target-buf agent-buf option-id)
-  "Remove the permission dialog identified by PERM-ID from TARGET-BUF.
-AGENT-BUF and OPTION-ID label the replacement text."
+    (perm-id target-buf _agent-buf _option-id)
+  "Remove the permission fragment identified by PERM-ID from TARGET-BUF.
+Deletes the fragment using its block-id (same as PERM-ID)."
   (when-let* ((buf (get-buffer target-buf)))
     (with-current-buffer buf
-      (save-excursion
-        (let ((inhibit-read-only t))
-          (goto-char (point-min))
-          (when-let* ((match (text-property-search-forward
-                              'agent-shell-dispatch-msg-perm-id perm-id t)))
-            (let ((start (prop-match-beginning match))
-                  (end (prop-match-end match)))
-              (delete-region start end)
-              (goto-char start)
-              (insert (propertize
-                       (format "    ✓ %s — %s\n" agent-buf option-id)
-                       'font-lock-face 'font-lock-comment-face
-                       'read-only t)))))))))
+      (agent-shell-ui-delete-fragment
+       :namespace-id "dispatch"
+       :block-id perm-id
+       :no-undo t)
+      (agent-shell-chat--schedule-relabel))))
 
 (defun agent-shell-dispatch-msg--make-respond-action
     (respond option-id agent-buf perm-id target-name)
@@ -317,7 +330,8 @@ OPTION-ID, AGENT-BUF, PERM-ID, and TARGET-NAME identify the dialog."
           (delete agent-buf
                   agent-shell-dispatch-msg--pending-permission-agents))
     (agent-shell-dispatch-msg--cleanup-permission
-     perm-id target-name agent-buf option-id)))
+     perm-id target-name agent-buf option-id)
+    (goto-char (point-max))))
 
 (defun agent-shell-dispatch-msg--make-permission-buttons
     (options keymap respond agent-buf perm-id target-name)
@@ -403,34 +417,37 @@ Returns propertized text with keymap for button interaction."
          (title (or (map-elt tool-call :title) "unknown"))
          (kind (or (map-elt tool-call :kind) "unknown"))
          (diff (map-elt tool-call :diff))
-         (perm-id (format "perm-%s-%s" agent-buf (random)))
+         (perm-id (or agent-shell-dispatch-msg--current-block-id
+                      (format "perm-%s-%s" agent-buf (random))))
          (keymap (make-sparse-keymap))
+         (target-name (or agent-shell-dispatch-msg--current-target-buf
+                         agent-shell-dispatch--primary-buffer ""))
          ;; Build option buttons
          (buttons (agent-shell-dispatch-msg--make-permission-buttons
                    options keymap respond agent-buf perm-id
-                   (or agent-shell-dispatch--primary-buffer "")))
+                   target-name))
          ;; Add View button if diff available
          (view-btn (when diff
                      (agent-shell-dispatch-msg--make-view-button
                       diff options respond keymap agent-buf perm-id
-                      (or agent-shell-dispatch--primary-buffer ""))))
+                      target-name)))
          (all-buttons (if view-btn
                          (concat view-btn " " buttons)
                        buttons))
+         (trimmed-buttons (if (string-suffix-p " " all-buttons)
+                              (substring all-buttons 0 -1)
+                            all-buttons))
          (text (concat
-                (propertize "⚠ " 'font-lock-face 'warning)
-                (propertize (format "Permission: %s" agent-buf)
-                            'font-lock-face 'bold)
-                " "
-                (propertize "⚠" 'font-lock-face 'warning)
-                "\n\n"
-                (propertize (format "%s (%s)" title kind)
+                (propertize (format "%s (%s)\n\n" title kind)
                             'font-lock-face 'comint-highlight-input)
-                "\n\n"
-                all-buttons)))
+                trimmed-buttons)))
     (put-text-property 0 (length text) 'keymap keymap text)
     (put-text-property 0 (length text)
                        'agent-shell-dispatch-msg-perm-id perm-id text)
+    (put-text-property 0 (length text)
+                       'agent-shell-markdown-frozen t text)
+    (put-text-property 0 (length text)
+                       'wrap-prefix "  " text)
     text))
 
 (cl-defmethod agent-shell-dispatch-msg-handle
@@ -440,23 +457,110 @@ Returns propertized text with keymap for button interaction."
               agent-shell-dispatch-msg--pending-permission-agents
               :test #'equal))
 
+(defun agent-shell-dispatch-msg--wake-redisplay ()
+  "Wake the Emacs event loop to force redisplay.
+On macOS NS Emacs, process filter output doesn't trigger redisplay
+when Emacs is idle in `read-event'.  Spawning a short-lived process
+that produces output after a tiny delay forces the event loop to wake
+and redisplay."
+  (make-process
+   :name "dispatch-wake"
+   :command '("bash" "-c" "sleep 0.05 && echo x")
+   :noquery t
+   :filter (lambda (proc _str)
+             (delete-process proc)
+             (redisplay t))))
+
+(defvar agent-shell-dispatch-msg--flush-timer nil
+  "Active timer for deferred permission flush retries.")
+
+(defun agent-shell-dispatch-msg--schedule-deferred-flush (target-buf)
+  "Schedule a repeating timer to flush deferred permissions for TARGET-BUF.
+Repeats every 0.2s until the buffer is ready or the queue is empty."
+  (when (and agent-shell-dispatch-msg--deferred-permissions
+             (not agent-shell-dispatch-msg--flush-timer))
+    (setq agent-shell-dispatch-msg--flush-timer
+          (run-with-timer
+           0.2 0.2
+           (lambda ()
+             (if (null agent-shell-dispatch-msg--deferred-permissions)
+                 (when agent-shell-dispatch-msg--flush-timer
+                   (cancel-timer agent-shell-dispatch-msg--flush-timer)
+                   (setq agent-shell-dispatch-msg--flush-timer nil))
+               (when-let* ((buf (get-buffer target-buf)))
+                 (with-current-buffer buf
+                   (when (and (not (shell-maker-busy))
+                              comint-last-prompt
+                              (marker-position (car comint-last-prompt))
+                              (agent-shell--live-input-prompt-p comint-last-prompt))
+                     (cancel-timer agent-shell-dispatch-msg--flush-timer)
+                     (setq agent-shell-dispatch-msg--flush-timer nil)
+                     (agent-shell-dispatch-msg-flush-deferred-permissions))))))))))
+
+(defun agent-shell-dispatch-msg--send-permission-now (msg target-buf)
+  "Render and insert permission MSG into TARGET-BUF as a fragment.
+Uses `agent-shell--update-fragment' with `:above-last-prompt' so the
+fragment lands above the prompt when possible, falling back to in-line
+insertion when the prompt isn't live (e.g. during streaming).
+Forces redisplay so the permission is immediately visible."
+  (when-let* ((buf (get-buffer target-buf)))
+    (let* ((agent (agent-shell-dispatch-msg-agent-buffer msg))
+           (block-id (format "dispatch-perm-%d"
+                             (cl-incf agent-shell-dispatch-msg--block-counter)))
+           (agent-shell-dispatch-msg--current-block-id block-id)
+           (agent-shell-dispatch-msg--current-target-buf (buffer-name buf))
+           (body (agent-shell-dispatch-msg-render msg)))
+      (with-current-buffer buf
+        (agent-shell--update-fragment
+         :state agent-shell--state
+         :namespace-id "dispatch"
+         :block-id block-id
+         :label-left (propertize (format "⚠ %s" agent)
+                                 'font-lock-face 'warning)
+         :label-right (propertize "Permission"
+                                  'font-lock-face 'agent-shell-warning)
+         :body body
+         :create-new t
+         :expanded t
+         :navigation 'never
+         :above-last-prompt t)
+        (save-excursion
+          (goto-char (point-max))
+          (when (text-property-search-backward
+                 'agent-shell-dispatch-msg-perm-id block-id
+                 #'equal t)
+            (let* ((inhibit-read-only t)
+                   (start (point))
+                   (end (next-single-property-change
+                         start 'agent-shell-dispatch-msg-perm-id
+                         nil (point-max))))
+              (put-text-property start end 'wrap-prefix "  "))))
+        ;; Force the dispatcher window to show the new content.
+        ;; We're inside the sub-agent's process filter.
+        (when-let* ((win (get-buffer-window buf t)))
+          (set-window-point win (point-max)))
+        (agent-shell-dispatch-msg--wake-redisplay))
+      (agent-shell-dispatch-msg-handle msg target-buf))))
+
 (cl-defmethod agent-shell-dispatch-msg-send
   ((msg agent-shell-dispatch-msg-permission) target-buf)
-  "Send permission MSG to TARGET-BUF: render with frame, insert, handle.
-Permission render returns text with embedded keymap that must be preserved."
-  (when-let* ((buf (get-buffer target-buf)))
-    (let* ((body (agent-shell-dispatch-msg-render msg))
-           (agent (agent-shell-dispatch-msg-agent-buffer msg))
-           (text (agent-shell-dispatch-msg--frame agent body)))
-      ;; Preserve the keymap and perm-id from the body across the frame
-      (when-let* ((km (get-text-property 0 'keymap body)))
-        (put-text-property 0 (length text) 'keymap km text))
-      (when-let* ((pid (get-text-property 0
-                         'agent-shell-dispatch-msg-perm-id body)))
-        (put-text-property 0 (length text)
-                           'agent-shell-dispatch-msg-perm-id pid text))
-      (agent-shell-dispatch-msg--insert-before-prompt buf text)
-      (agent-shell-dispatch-msg-handle msg target-buf))))
+  "Send permission MSG to TARGET-BUF as an interactive fragment.
+Inserts immediately — `agent-shell--update-fragment' handles positioning
+gracefully whether the buffer is idle or streaming."
+  (agent-shell-dispatch-msg--send-permission-now msg target-buf))
+
+(defun agent-shell-dispatch-msg-flush-deferred-permissions ()
+  "Render deferred permission messages. Call when dispatcher goes idle.
+Already-rendered permissions stay in place — the dispatch graph's
+permission icon indicates when a child agent is blocked.
+If any permissions re-defer (prompt not yet live), schedules a retry."
+  (let ((pending (nreverse agent-shell-dispatch-msg--deferred-permissions)))
+    (setq agent-shell-dispatch-msg--deferred-permissions nil)
+    (dolist (entry pending)
+      (agent-shell-dispatch-msg--send-permission-now (car entry) (cdr entry)))
+    (when agent-shell-dispatch-msg--deferred-permissions
+      (agent-shell-dispatch-msg--schedule-deferred-flush
+       (cdar agent-shell-dispatch-msg--deferred-permissions)))))
 
 ;; ── Handle methods ──────────────────────────────────────────────────
 
