@@ -52,6 +52,11 @@
   :type 'number
   :group 'agent-shell-dispatch)
 
+(defcustom agent-shell-dispatch-wayfinder-auto-start t
+  "When non-nil, automatically start tickets whose blockers are all done."
+  :type 'boolean
+  :group 'agent-shell-dispatch)
+
 ;; ── Normalized ticket format ───────────────────────────────────────────
 ;;
 ;; Both backends produce tickets as plists:
@@ -88,11 +93,12 @@
                             (when (re-search-forward "^Status:\\s-*\\(\\S-+\\)" nil t)
                               (match-string 1))))
              (blocked-by (progn (goto-char (point-min))
-                                (when (re-search-forward "^Blocked by:\\s-*\\(.+\\)" nil t)
-                                  (let ((raw (match-string 1)))
-                                    (mapcar (lambda (s)
-                                              (string-trim (replace-regexp-in-string "^0+" "" s)))
-                                            (split-string raw ",")))))))
+                                (when (re-search-forward "^Blocked by:[ \t]*\\([^\n]+\\)" nil t)
+                                  (let ((raw (string-trim (match-string 1))))
+                                    (when (not (string-empty-p raw))
+                                      (mapcar (lambda (s)
+                                                (string-trim (replace-regexp-in-string "^0+" "" s)))
+                                              (split-string raw ","))))))))
         (when id
           (list :id (replace-regexp-in-string "^0+" "" id)
                 :name (or name basename)
@@ -221,8 +227,8 @@ Uses `gh issue list` to find child tickets. Returns normalized ticket list."
 
 (defun agent-shell-dispatch-wayfinder--sync-statuses (tickets)
   "Report dispatch statuses for all TICKETS based on their tracker state.
-Does not downgrade a ticket already reported as \"working\" — the spawned
-agent's liveness takes precedence over the file's \"claimed\" state."
+Never downgrades: once a ticket reaches working or done via the dispatch
+system, the file's claimed/waiting state cannot override it."
   (dolist (ticket tickets)
     (let* ((id (plist-get ticket :id))
            (status (agent-shell-dispatch-wayfinder--ticket-dispatch-status ticket))
@@ -231,9 +237,34 @@ agent's liveness takes precedence over the file's \"claimed\" state."
                          (gethash id (agent-shell-dispatch-state-statuses state))))
            (existing-status (and existing
                                  (agent-shell-dispatch-reported-status-status existing))))
-      (unless (and (eq existing-status 'working)
-                   (equal status "claimed"))
+      (unless (and (memq existing-status '(working done))
+                   (member status '("claimed" "waiting")))
         (agent-shell-dispatch-report id status)))))
+
+(defun agent-shell-dispatch-wayfinder--auto-start-ready (tickets)
+  "Start any TICKETS whose blockers are all done and that haven't been claimed.
+Only acts when `agent-shell-dispatch-wayfinder-auto-start' is non-nil.
+A dependency is considered done only when explicitly reported as done."
+  (when agent-shell-dispatch-wayfinder-auto-start
+    (let ((state agent-shell-dispatch--state))
+      (when state
+        (let ((statuses (agent-shell-dispatch-state-statuses state)))
+          (dolist (ticket tickets)
+            (let* ((id (plist-get ticket :id))
+                   (tracker-status (plist-get ticket :status))
+                   (existing (gethash id statuses))
+                   (dispatch-status (and existing
+                                         (agent-shell-dispatch-reported-status-status existing)))
+                   (blocked-by (plist-get ticket :blocked-by)))
+              (when (and (not tracker-status)
+                         (not (memq dispatch-status '(claimed working done)))
+                         (or (null blocked-by)
+                             (cl-every
+                              (lambda (dep-id)
+                                (let ((dep (gethash dep-id statuses)))
+                                  (and dep (eq 'done (agent-shell-dispatch-reported-status-status dep)))))
+                              blocked-by)))
+                (agent-shell-dispatch-wayfinder-start-ticket id)))))))))
 
 (defun agent-shell-dispatch-wayfinder--diff-and-apply (tickets)
   "Compute the diff between current graph and TICKETS, apply incrementally.
@@ -373,13 +404,15 @@ BACKEND is `local' (default) or `github'."
             agent-shell-dispatch-wayfinder--backend be
             agent-shell-dispatch-wayfinder--known-ids ids)
       (agent-shell-dispatch-wayfinder--sync-statuses tickets)
+      (agent-shell-dispatch-wayfinder--auto-start-ready tickets)
       (agent-shell-dispatch-wayfinder--start-watching effort be))
     (message "Wayfinder: loaded %d tickets from %s (%s)" (length tickets) effort be)))
 
 (defun agent-shell-dispatch-wayfinder-refresh ()
   "Re-read the active effort and incrementally update the dispatch graph.
 Adds nodes for newly graduated tickets, removes out-of-scope'd ones,
-and syncs all statuses. Call after any ticket state change."
+and syncs all statuses.  When `agent-shell-dispatch-wayfinder-auto-start'
+is non-nil, automatically starts unblocked tickets."
   (interactive)
   (let ((buf (agent-shell-dispatch-wayfinder--dispatch-buffer)))
     (unless buf
@@ -391,18 +424,43 @@ and syncs all statuses. Call after any ticket state change."
                        agent-shell-dispatch-wayfinder--effort
                        agent-shell-dispatch-wayfinder--backend)))
         (agent-shell-dispatch-wayfinder--diff-and-apply tickets)
-        (agent-shell-dispatch-wayfinder--sync-statuses tickets)))))
+        (agent-shell-dispatch-wayfinder--sync-statuses tickets)
+        (agent-shell-dispatch-wayfinder--auto-start-ready tickets)))))
 
 (defun agent-shell-dispatch-wayfinder-unload ()
-  "Stop dispatch and clear wayfinder state."
+  "Stop dispatch and clear all wayfinder and dispatch state."
   (interactive)
   (when-let* ((buf (agent-shell-dispatch-wayfinder--dispatch-buffer)))
     (with-current-buffer buf
       (agent-shell-dispatch-wayfinder--stop-watching)
       (agent-shell-dispatch-stop)
+      (agent-shell-dispatch--clear-state)
       (setq agent-shell-dispatch-wayfinder--effort nil
             agent-shell-dispatch-wayfinder--backend nil
             agent-shell-dispatch-wayfinder--known-ids nil))))
+
+(defun agent-shell-dispatch-wayfinder--on-agent-complete ()
+  "Handle a subagent's turn completion.
+When the agent is no longer busy, reports its task as done and
+refreshes to cascade auto-start to unblocked tickets."
+  (let ((agent-buf (buffer-name (current-buffer))))
+    (run-with-idle-timer
+     0.5 nil
+     (lambda ()
+       (when-let* ((dispatch-buf (ignore-errors
+                                   (agent-shell-dispatch-wayfinder--dispatch-buffer))))
+         (with-current-buffer dispatch-buf
+           (when (and agent-shell-dispatch-wayfinder--effort
+                      agent-shell-dispatch--state)
+             ;; Find the task owned by this agent and report done if idle
+             (let* ((abuf (get-buffer agent-buf))
+                    (busy (and abuf (with-current-buffer abuf (shell-maker-busy)))))
+               (unless busy
+                 (when-let* ((task (cl-find-if
+                                    (lambda (t_) (equal (plist-get t_ :agent) agent-buf))
+                                    (agent-shell-dispatch-state-tasks agent-shell-dispatch--state))))
+                   (agent-shell-dispatch-report (plist-get task :id) "done"))))
+             (agent-shell-dispatch-wayfinder-refresh))))))))
 
 (defun agent-shell-dispatch-wayfinder-start-ticket (id &optional message)
   "Claim ticket ID, spawn an agent for it, and mark it working.
@@ -464,7 +522,13 @@ Requires an active wayfinder effort."
                           (task (cl-find-if
                                  (lambda (t_) (equal (plist-get t_ :id) id-normalized))
                                  (agent-shell-dispatch-state-tasks state))))
-                (plist-put task :agent agent-buf))))
+                (plist-put task :agent agent-buf))
+              ;; Subscribe to subagent completion to trigger auto-start cascade
+              (agent-shell-subscribe-to
+               :shell-buffer (get-buffer agent-buf)
+               :event 'turn-complete
+               :on-event (lambda (_event)
+                           (agent-shell-dispatch-wayfinder--on-agent-complete)))))
           ;; Report working and refresh
           (agent-shell-dispatch-report id-normalized "working")
           (agent-shell-dispatch-wayfinder-refresh)

@@ -295,6 +295,12 @@ Errors stay visible, not collapsed."
 
 ;; ── Permission state ────────────────────────────────────────────────
 
+(defvar agent-shell-dispatch-msg-show-permissions-in-dispatcher nil
+  "When non-nil, render permission fragments in the dispatcher buffer.
+When nil (the default), permissions are handled in the subagent's own
+buffer.  The SVG header lock icon always indicates blocked subagents
+regardless of this setting.")
+
 (defvar agent-shell-dispatch-msg--pending-permission-agents nil
   "List of agent buffer names with unresolved permission dialogs.")
 
@@ -458,18 +464,11 @@ Returns propertized text with keymap for button interaction."
               :test #'equal))
 
 (defun agent-shell-dispatch-msg--wake-redisplay ()
-  "Wake the Emacs event loop to force redisplay.
-On macOS NS Emacs, process filter output doesn't trigger redisplay
-when Emacs is idle in `read-event'.  Spawning a short-lived process
-that produces output after a tiny delay forces the event loop to wake
-and redisplay."
-  (make-process
-   :name "dispatch-wake"
-   :command '("bash" "-c" "sleep 0.05 && echo x")
-   :noquery t
-   :filter (lambda (proc _str)
-             (delete-process proc)
-             (redisplay t))))
+  "Attempt to force a visible repaint after inserting a fragment.
+On macOS NS Emacs this is best-effort -- the display may not flush
+until the next user interaction.  The SVG header's permission icon
+provides the primary signal that a subagent is blocked."
+  (redisplay t))
 
 (defvar agent-shell-dispatch-msg--flush-timer nil
   "Active timer for deferred permission flush retries.")
@@ -536,7 +535,6 @@ Forces redisplay so the permission is immediately visible."
                          nil (point-max))))
               (put-text-property start end 'wrap-prefix "  "))))
         ;; Force the dispatcher window to show the new content.
-        ;; We're inside the sub-agent's process filter.
         (when-let* ((win (get-buffer-window buf t)))
           (set-window-point win (point-max)))
         (agent-shell-dispatch-msg--wake-redisplay))
@@ -545,22 +543,27 @@ Forces redisplay so the permission is immediately visible."
 (cl-defmethod agent-shell-dispatch-msg-send
   ((msg agent-shell-dispatch-msg-permission) target-buf)
   "Send permission MSG to TARGET-BUF as an interactive fragment.
-Inserts immediately — `agent-shell--update-fragment' handles positioning
-gracefully whether the buffer is idle or streaming."
-  (agent-shell-dispatch-msg--send-permission-now msg target-buf))
+Only renders in the dispatcher when
+`agent-shell-dispatch-msg-show-permissions-in-dispatcher' is non-nil.
+Always tracks the pending permission for SVG status icon."
+  (agent-shell-dispatch-msg-handle msg target-buf)
+  (when agent-shell-dispatch-msg-show-permissions-in-dispatcher
+    (agent-shell-dispatch-msg--send-permission-now msg target-buf)))
 
 (defun agent-shell-dispatch-msg-flush-deferred-permissions ()
   "Render deferred permission messages. Call when dispatcher goes idle.
-Already-rendered permissions stay in place — the dispatch graph's
+Already-rendered permissions stay in place -- the dispatch graph's
 permission icon indicates when a child agent is blocked.
-If any permissions re-defer (prompt not yet live), schedules a retry."
-  (let ((pending (nreverse agent-shell-dispatch-msg--deferred-permissions)))
-    (setq agent-shell-dispatch-msg--deferred-permissions nil)
-    (dolist (entry pending)
-      (agent-shell-dispatch-msg--send-permission-now (car entry) (cdr entry)))
-    (when agent-shell-dispatch-msg--deferred-permissions
-      (agent-shell-dispatch-msg--schedule-deferred-flush
-       (cdar agent-shell-dispatch-msg--deferred-permissions)))))
+Only renders when `agent-shell-dispatch-msg-show-permissions-in-dispatcher'
+is non-nil."
+  (when agent-shell-dispatch-msg-show-permissions-in-dispatcher
+    (let ((pending (nreverse agent-shell-dispatch-msg--deferred-permissions)))
+      (setq agent-shell-dispatch-msg--deferred-permissions nil)
+      (dolist (entry pending)
+        (agent-shell-dispatch-msg--send-permission-now (car entry) (cdr entry)))
+      (when agent-shell-dispatch-msg--deferred-permissions
+        (agent-shell-dispatch-msg--schedule-deferred-flush
+         (cdar agent-shell-dispatch-msg--deferred-permissions))))))
 
 ;; ── Handle methods ──────────────────────────────────────────────────
 

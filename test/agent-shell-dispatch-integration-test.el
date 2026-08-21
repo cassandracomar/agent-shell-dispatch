@@ -333,20 +333,26 @@ preventing tasks from resolving to `dead'."
 (ert-deftest dispatch-permission-marks-status-permission ()
   "A pending permission on a working task shows as 'permission' in the status map."
   (with-dispatch-buffer
-    (agent-shell-dispatch-start (buffer-name)
-                                (list (list :id "t1" :name "Task 1"
-                                            :depends-on nil
-                                            :agent "[agent:worker]")))
-    ;; Report working
-    (agent-shell-dispatch-report "t1" "working")
-    ;; Simulate a pending permission from that agent
-    (setq agent-shell-dispatch-msg--pending-permission-agents
-          (list "[agent:worker]"))
-    (let ((sm (agent-shell-dispatch--build-status-map)))
-      (should (eq 'permission
-                  (agent-shell-dispatch-render-task-status-status
-                   (gethash "t1" sm)))))
-    (agent-shell-dispatch-stop)))
+    (let ((agent-buf (generate-new-buffer "[agent:worker]")))
+      (unwind-protect
+          (progn
+            (agent-shell-dispatch-start (buffer-name)
+                                        (list (list :id "t1" :name "Task 1"
+                                                    :depends-on nil
+                                                    :agent (buffer-name agent-buf))))
+            ;; Report working
+            (agent-shell-dispatch-report "t1" "working")
+            ;; Simulate a pending permission from that agent
+            (setq agent-shell-dispatch-msg--pending-permission-agents
+                  (list (buffer-name agent-buf)))
+            ;; Agent must appear busy for prune not to clear it
+            (let ((shell-maker-busy-val t))
+              (let ((sm (agent-shell-dispatch--build-status-map)))
+                (should (eq 'permission
+                            (agent-shell-dispatch-render-task-status-status
+                             (gethash "t1" sm))))))
+            (agent-shell-dispatch-stop))
+        (kill-buffer agent-buf)))))
 
 (ert-deftest dispatch-resolve-status-dead-when-process-gone ()
   "A working task with a dead buffer process resolves to 'dead'."

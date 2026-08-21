@@ -40,7 +40,10 @@
 ;; -- Permission forwarding from background agents to dispatcher buffer --
 
 (defun agent-shell-dispatch-forward-permission (permission)
-  "Forward PERMISSION from a background agent via the messaging protocol."
+  "Forward PERMISSION from a background agent via the messaging protocol.
+Returns t if the permission is fully handled (rendered in the dispatcher).
+Returns nil to let agent-shell show its native permission UI in the
+subagent buffer -- the SVG status icon still updates either way."
   (when-let* ((target agent-shell-dispatch--primary-buffer))
     (agent-shell-dispatch-msg-send
      (agent-shell-dispatch-msg-permission-make
@@ -50,7 +53,7 @@
       :options (map-elt permission :options)
       :respond (map-elt permission :respond))
      target)
-    t))
+    agent-shell-dispatch-msg-show-permissions-in-dispatcher))
 
 ;; -- Queue drain after response completion --
 
@@ -197,6 +200,7 @@ DETAIL is an optional description of current activity."
 (defun agent-shell-dispatch--build-status-map ()
   "Build a status-map hash from current dispatch state.
 Returns a hash of id → `agent-shell-dispatch-render-task-status', or nil."
+  (agent-shell-dispatch--prune-stale-permissions)
   (when-let* ((state agent-shell-dispatch--state)
               (tasks (agent-shell-dispatch-state-tasks state))
               (statuses (agent-shell-dispatch-state-statuses state)))
