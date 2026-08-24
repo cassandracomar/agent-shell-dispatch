@@ -9,7 +9,7 @@ Multi-agent dispatch and coordination for [agent-shell](https://github.com/xenod
 - **Live SVG task graph** -- dependency-aware DAG rendered in the header line with status colors and state indicators
 - **Explicit status model** -- tasks are `not-started`, `working`, `done`, `error`, `permission`, or `dead`, driven entirely by explicit reports (no process-state guessing)
 - **Parallel agent spawning** -- launch background agent-shell sessions that work independently
-- **Permission forwarding** -- tool permission requests from background agents surface as interactive button dialogs in the dispatcher buffer (with ediff support for file diffs)
+- **Permission forwarding** -- tool permission requests from background agents show as a lock icon in the SVG header; the native permission UI appears in the subagent's own buffer by default (optionally rendered in the dispatcher via `agent-shell-dispatch-msg-show-permissions-in-dispatcher`)
 - **Inter-agent messaging** -- typed message protocol for progress reports, error reports, input requests, and completion notifications
 - **Dispatcher pattern** -- the primary agent coordinates without implementing; subagents communicate via messages only, and the dispatcher owns all task graph updates
 - **Agent activity tracker** -- a compact column on the left of the task graph shows each agent's busy/idle state in real-time, auto-wrapping to multiple columns when needed
@@ -171,6 +171,7 @@ no restart needed.
 
 The bridge handles:
 
+- **Auto-start cascade** -- tickets whose blockers are all done start automatically (controlled by `agent-shell-dispatch-wayfinder-auto-start`, default `t`). On load, any ticket with no blockers starts immediately; as agents complete, newly unblocked tickets cascade through the graph
 - **Fog of war** -- new tickets added by wayfinder appear as new nodes without restarting dispatch
 - **Out of scope** -- tickets removed/closed by wayfinder disappear from the graph
 - **Edge changes** -- updated `Blocked by:` lines re-route arrows
@@ -242,6 +243,12 @@ All dispatch and render state is buffer-local, so multiple independent dispatch 
 | `agent-shell-dispatch-wayfinder-refresh` | Incrementally sync the graph from the tracker (add/remove/update) |
 | `agent-shell-dispatch-wayfinder-unload` | Stop dispatch and clear wayfinder state |
 | `agent-shell-dispatch-wayfinder-start-ticket` | Claim a ticket, spawn an agent for it, and mark it working |
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `agent-shell-dispatch-wayfinder-auto-start` | `t` | Automatically start tickets whose blockers are all done |
+| `agent-shell-dispatch-wayfinder-poll-interval` | `5.0` | Seconds between GitHub backend poll refreshes |
+| `agent-shell-dispatch-msg-show-permissions-in-dispatcher` | `nil` | Render permission fragments in the dispatcher buffer (SVG lock icon always shows regardless) |
 
 ## License
 
