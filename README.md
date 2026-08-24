@@ -9,7 +9,7 @@ Multi-agent dispatch and coordination for [agent-shell](https://github.com/xenod
 - **Live SVG task graph** -- dependency-aware DAG rendered in the header line with status colors and state indicators
 - **Explicit status model** -- tasks are `not-started`, `working`, `done`, `error`, `permission`, or `dead`, driven entirely by explicit reports (no process-state guessing)
 - **Parallel agent spawning** -- launch background agent-shell sessions that work independently
-- **Permission forwarding** -- tool permission requests from background agents surface as interactive button dialogs in the dispatcher buffer (with ediff support for file diffs)
+- **Permission forwarding** -- tool permission requests from background agents show as a lock icon in the SVG header; the native permission UI appears in the subagent's own buffer by default (optionally rendered in the dispatcher via `agent-shell-dispatch-msg-show-permissions-in-dispatcher`)
 - **Inter-agent messaging** -- typed message protocol for progress reports, error reports, input requests, and completion notifications
 - **Dispatcher pattern** -- the primary agent coordinates without implementing; subagents communicate via messages only, and the dispatcher owns all task graph updates
 - **Agent activity tracker** -- a compact column on the left of the task graph shows each agent's busy/idle state in real-time, auto-wrapping to multiple columns when needed
@@ -123,19 +123,106 @@ The agent becomes the dispatcher: it spawns implementation agents, assigns tasks
 
 The dispatcher owns all task graph transitions. Subagents cannot call `agent-shell-dispatch-report` or `agent-shell-dispatch-start`.
 
+### 4. (Optional) Wayfinder integration
+
+If you use Matt Pocock's [wayfinder](https://github.com/mattpocock/skills) skill, the `agent-shell-dispatch-wayfinder.el` bridge renders wayfinder efforts as live SVG task graphs. Tickets become nodes, `Blocked by:` lines become dependency edges, and status transitions (claimed/resolved) animate in real time.
+
+Two tracker backends are supported:
+
+| Backend | Ticket source | Blocking convention | Load call |
+|---------|---------------|---------------------|-----------|
+| `local` (default) | `.scratch/<effort>/issues/NN-slug.md` | `Blocked by: NN, NN` line in file | `(agent-shell-dispatch-wayfinder-load "<effort>")` |
+| `github` | GitHub Issues with `wayfinder:*` labels | `Blocked by: #N, #N` line in issue body | `(agent-shell-dispatch-wayfinder-load "<effort>" :backend 'github)` |
+
+Add the following to your global `CLAUDE.md` (or `AGENTS.md`) so the wayfinder skill knows to call the dispatch hooks:
+
+```markdown
+## agent-shell-dispatch — Wayfinder integration
+
+When running `/wayfinder`, evaluate these elisp hooks at the specified lifecycle
+points to keep the SVG task graph in sync:
+
+### Local markdown tracker (default)
+
+| Wayfinder lifecycle point | Elisp to evaluate |
+|---------------------------|-------------------|
+| Chart — after tickets created and wired (step 4) | `(progn (require 'agent-shell-dispatch-wayfinder) (agent-shell-dispatch-wayfinder-load "<effort-slug>"))` |
+| Chart — fire research subagents (step 5) | `(agent-shell-dispatch-spawn-agent default-directory "<ticket-slug>" "Research: <question>")` |
+| Work-through — after claiming (step 2) | `(agent-shell-dispatch-wayfinder-refresh)` |
+| Work-through — after resolving (step 4) | `(agent-shell-dispatch-wayfinder-refresh)` |
+| Work-through — after creating/graduating tickets (step 5) | `(agent-shell-dispatch-wayfinder-refresh)` |
+| Session end | `(agent-shell-dispatch-wayfinder-unload)` |
+
+### GitHub Issues tracker
+
+| Wayfinder lifecycle point | Elisp to evaluate |
+|---------------------------|-------------------|
+| Chart — after tickets created and wired (step 4) | `(progn (require 'agent-shell-dispatch-wayfinder) (agent-shell-dispatch-wayfinder-load "<effort-slug>" :backend 'github))` |
+| Chart — fire research subagents (step 5) | `(agent-shell-dispatch-spawn-agent default-directory "<ticket-slug>" "Research: <question>")` |
+| Work-through — after claiming (step 2) | `(agent-shell-dispatch-wayfinder-refresh)` |
+| Work-through — after resolving (step 4) | `(agent-shell-dispatch-wayfinder-refresh)` |
+| Work-through — after creating/graduating tickets (step 5) | `(agent-shell-dispatch-wayfinder-refresh)` |
+| Session end | `(agent-shell-dispatch-wayfinder-unload)` |
+
+Research subagents spawned via `agent-shell-dispatch-spawn-agent` appear in
+the agent activity column. The graph grows incrementally as fog clears —
+no restart needed.
+```
+
+The bridge handles:
+
+- **Auto-start cascade** -- tickets whose blockers are all done start automatically (controlled by `agent-shell-dispatch-wayfinder-auto-start`, default `t`). On load, any ticket with no blockers starts immediately; as agents complete, newly unblocked tickets cascade through the graph
+- **Fog of war** -- new tickets added by wayfinder appear as new nodes without restarting dispatch
+- **Out of scope** -- tickets removed/closed by wayfinder disappear from the graph
+- **Edge changes** -- updated `Blocked by:` lines re-route arrows
+- **Backend-agnostic refresh** -- `agent-shell-dispatch-wayfinder-refresh` uses whichever backend was set at load time
+
 ## Architecture
 
-The package is split into three modules:
+The package is split into five modules:
 
 | Module | Purpose |
 |--------|---------|
-| `agent-shell-dispatch.el` | Agent lifecycle, status resolution, spawn/send/kill coordination |
+| `agent-shell-dispatch.el` | Agent lifecycle, spawn/send/kill coordination, incremental graph mutation, global mode |
+| `agent-shell-dispatch-state.el` | Core data structures (session state, agent info, status structs), pure status resolution, buffer-local state variables |
 | `agent-shell-dispatch-messages.el` | Typed messaging protocol between sub-agents and dispatcher (permissions, progress, errors, input requests, completions) |
 | `agent-shell-dispatch-render.el` | Pure SVG task-graph renderer -- topology, geometry, theme-aware drawing, viewport panning |
+| `agent-shell-dispatch-wayfinder.el` | Bridge between wayfinder efforts and the dispatch graph -- reads tickets from local markdown or GitHub Issues, maps blocking edges to DAG dependencies, incremental sync |
+
+Module boundaries:
+
+- **state** defines all structs (`agent-shell-dispatch-state`, `agent-shell-dispatch-agent-info`, `agent-shell-dispatch-reported-status`, `agent-shell-dispatch-resolved-status`) and owns status resolution logic. Pure -- no side effects beyond the hash table it's given.
+- **render** is pure -- no knowledge of agents, processes, or dispatch lifecycle. It receives resolved task data and produces SVGs. The dispatcher injects callbacks via hook variables.
+- **messages** owns the typed protocol and UI rendering for inter-agent communication. Permission forwarding, deferred queuing, and fragment management live here.
+- **dispatch** owns agent lifecycle and wires state, render, and messages together. It manages subscriptions and exposes the public mutation API (`add-task`, `add-tasks`, `remove-task`, `report`).
+- **wayfinder** is an optional bridge layer that maps external ticket state into dispatch primitives. It depends on dispatch but nothing depends on it.
 
 All dispatch and render state is buffer-local, so multiple independent dispatch sessions can run concurrently in separate agent-shell buffers.
 
 ## API Reference
+
+### Dispatch lifecycle
+
+| Function | Description |
+|----------|-------------|
+| `agent-shell-dispatch-start` | Register tasks and start the SVG task graph |
+| `agent-shell-dispatch-start-current` | Start the SVG task graph in the current request's agent-shell buffer |
+| `agent-shell-dispatch-stop` | Stop rendering (state preserved for toggle) |
+| `agent-shell-dispatch-report` | Report task status (`working`, `done`, `error`) -- dispatcher only |
+| `agent-shell-dispatch-current-agent-buffer` | Resolve the agent-shell buffer associated with an MCP/eval request |
+| `agent-shell-dispatch-current-agent-buffer-name` | Like above, but returns the buffer name string |
+| `agent-shell-dispatch-global-mode` | Global minor mode -- installs all advice (render, queue drain, mode propagation) |
+| `agent-shell-dispatch-render-mode` | Buffer-local minor mode -- manages heartbeat timer |
+
+### Graph mutation
+
+| Function | Description |
+|----------|-------------|
+| `agent-shell-dispatch-add-task` | Add or replace a single task node without restarting |
+| `agent-shell-dispatch-add-tasks` | Batch-add multiple task nodes (single render rebuild) |
+| `agent-shell-dispatch-remove-task` | Remove a task node and clean up dangling edges |
+
+### Agent coordination
 
 | Function | Description |
 |----------|-------------|
@@ -144,16 +231,24 @@ All dispatch and render state is buffer-local, so multiple independent dispatch 
 | `agent-shell-dispatch-list-agents` | List active dispatch agent buffers with status |
 | `agent-shell-dispatch-view-agent` | View recent output from one agent |
 | `agent-shell-dispatch-view-all-agents` | View recent output from all agents |
-| `agent-shell-dispatch-start` | Register tasks and start the SVG task graph |
-| `agent-shell-dispatch-start-current` | Start the SVG task graph in the current request's agent-shell buffer |
-| `agent-shell-dispatch-current-agent-buffer-name` | Resolve the agent-shell buffer name associated with an MCP/eval request |
-| `agent-shell-dispatch-stop` | Stop rendering (state preserved for toggle) |
-| `agent-shell-dispatch-report` | Report task status -- dispatcher only |
 | `agent-shell-dispatch-agent-buffer` | Look up full buffer name from short agent name |
 | `agent-shell-dispatch-interrupt-agent` | Interrupt a running agent |
 | `agent-shell-dispatch-kill-agents` | Kill all dispatch agents and stop rendering |
-| `agent-shell-dispatch-global-mode` | Global minor mode -- installs all advice (render, queue drain, mode propagation) |
-| `agent-shell-dispatch-render-mode` | Buffer-local minor mode -- manages heartbeat timer |
+
+### Wayfinder bridge
+
+| Function | Description |
+|----------|-------------|
+| `agent-shell-dispatch-wayfinder-load` | Parse a wayfinder effort and start dispatch with its task graph |
+| `agent-shell-dispatch-wayfinder-refresh` | Incrementally sync the graph from the tracker (add/remove/update) |
+| `agent-shell-dispatch-wayfinder-unload` | Stop dispatch and clear wayfinder state |
+| `agent-shell-dispatch-wayfinder-start-ticket` | Claim a ticket, spawn an agent for it, and mark it working |
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `agent-shell-dispatch-wayfinder-auto-start` | `t` | Automatically start tickets whose blockers are all done |
+| `agent-shell-dispatch-wayfinder-poll-interval` | `5.0` | Seconds between GitHub backend poll refreshes |
+| `agent-shell-dispatch-msg-show-permissions-in-dispatcher` | `nil` | Render permission fragments in the dispatcher buffer (SVG lock icon always shows regardless) |
 
 ## License
 
