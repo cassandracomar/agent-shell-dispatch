@@ -1,4 +1,5 @@
 ;;; agent-shell-dispatch-render.el --- SVG task-graph renderer -*- lexical-binding: t; -*-
+;; box-test
 
 ;;; Commentary:
 
@@ -15,11 +16,6 @@
 ;; Forward declarations for buffer-local variables defined later
 (defvar agent-shell-dispatch-render-buffer)
 
-;; Cross-file struct accessors and functions (from agent-shell-dispatch.el)
-(declare-function agent-shell-dispatch-agent-info-name "agent-shell-dispatch" (info))
-(declare-function agent-shell-dispatch-agent-info-busy "agent-shell-dispatch" (info))
-(declare-function agent-shell-dispatch-global-mode "agent-shell-dispatch" (&optional arg))
-
 ;; ── Color blending (replaces doom-blend) ────────────────────────────
 
 (defun agent-shell-dispatch-render--blend-colors (color1 color2 alpha)
@@ -33,6 +29,14 @@ ALPHA=1.0 returns COLOR1, ALPHA=0.0 returns COLOR2."
                    '(2)))))
 
 ;; ── Structs ─────────────────────────────────────────────────────────
+
+(cl-defstruct (agent-shell-dispatch-render-agent
+               (:constructor agent-shell-dispatch-render-agent-make)
+               (:copier nil))
+  "Agent display data for the renderer.
+This is the renderer's protocol type — callers produce these,
+the renderer never reaches into dispatch internals."
+  name busy)
 
 (cl-defstruct (agent-shell-dispatch-render-status-style
                (:constructor agent-shell-dispatch-render-status-style-make)
@@ -170,11 +174,11 @@ Derived at runtime via `agent-shell-dispatch-render--derived-layout':
 ;; ── Spinner ─────────────────────────────────────────────────────────
 
 (defvar agent-shell-dispatch-render--spinner-frames
-  '("⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏")
-  "Braille spinner animation frames.")
+  '("◐" "◓" "◑" "◒")
+  "Quarter-circle spinner animation frames.")
 
-(defvar agent-shell-dispatch-render--spinner-index 0
-  "Current spinner frame index.")
+(defconst agent-shell-dispatch-render--spinner-fps 10
+  "Spinner frames per second, matching the heartbeat interval.")
 
 ;; ── Theme ───────────────────────────────────────────────────────────
 
@@ -263,6 +267,8 @@ Respects face remapping (e.g. `solaire-mode') in the dispatcher buffer."
                                 :bg (agent-shell-dispatch-render--blend-colors wrn bg tint) :fg wrn :icon "⠹"))
              (cons 'permission (agent-shell-dispatch-render-status-style-make
                                 :bg (agent-shell-dispatch-render--blend-colors err bg tint) :fg err :icon "🔒"))
+             (cons 'claimed    (agent-shell-dispatch-render-status-style-make
+                                :bg (agent-shell-dispatch-render--blend-colors wrn bg 0.15) :fg wrn :icon "◑"))
              (cons 'waiting    (agent-shell-dispatch-render-status-style-make
                                 :bg (agent-shell-dispatch-render--blend-colors dim bg 0.1)  :fg dim :icon "◦"))
              (cons 'error      (agent-shell-dispatch-render-status-style-make
@@ -592,8 +598,9 @@ Calibrated against actual librsvg rendering via the theme's correction factor."
 
 (defun agent-shell-dispatch-render--agent-layout (agents h theme)
   "Compute per-column layout for agent activity display.
+AGENTS is a list of `agent-shell-dispatch-render-agent' structs.
 Returns a plist (:total-w WIDTH :columns COLS :per-col N :sorted LIST).
-Each entry in COLS is (:x X :w W :agents LIST-OF-INFO)."
+Each entry in COLS is (:x X :w W :agents LIST-OF-AGENT)."
   (let* ((L (agent-shell-dispatch-render--derived-layout))
          (font (agent-shell-dispatch-render-theme-font theme))
          (font-size (plist-get L :node-font-size))
@@ -601,11 +608,10 @@ Each entry in COLS is (:x X :w W :agents LIST-OF-INFO)."
          (row-h (plist-get L :agent-row-h))
          (col-gap (plist-get L :agent-col-gap))
          (avail-h (- h (plist-get L :agent-margin)))
-         (sorted (let (entries)
-                   (maphash (lambda (_buf info) (push info entries)) agents)
-                   (sort entries (lambda (a b)
-                                   (string< (agent-shell-dispatch-agent-info-name a)
-                                            (agent-shell-dispatch-agent-info-name b))))))
+         (sorted (sort (copy-sequence agents)
+                       (lambda (a b)
+                         (string< (agent-shell-dispatch-render-agent-name a)
+                                  (agent-shell-dispatch-render-agent-name b)))))
          (n (length sorted))
          (per-col (max 1 (floor avail-h row-h)))
          (cols nil)
@@ -615,7 +621,7 @@ Each entry in COLS is (:x X :w W :agents LIST-OF-INFO)."
              for col-agents = (seq-subseq sorted start (min (+ start per-col) n))
              for max-pw = (cl-loop for info in col-agents
                                    maximize (agent-shell-dispatch-render--text-pixel-width
-                                             (agent-shell-dispatch-agent-info-name info)
+                                             (agent-shell-dispatch-render-agent-name info)
                                              font font-size))
              for w = (+ (* 2 pad-x) max-pw)
              do (push (list :x cur-x :w w :agents col-agents) cols)
@@ -625,11 +631,13 @@ Each entry in COLS is (:x X :w W :agents LIST-OF-INFO)."
           :per-col per-col)))
 
 (defun agent-shell-dispatch-render--agent-column-width (agents h theme)
-  "Compute total pixel width needed for the agent column(s)."
+  "Compute total pixel width needed for the agent column(s).
+AGENTS is a list of `agent-shell-dispatch-render-agent' structs."
   (plist-get (agent-shell-dispatch-render--agent-layout agents h theme) :total-w))
 
 (defun agent-shell-dispatch-render--draw-agent-column (svg agents x h theme)
   "Draw agent activity indicators as labeled boxes on SVG at X.
+AGENTS is a list of `agent-shell-dispatch-render-agent' structs.
 Filled box = busy, hollow box = idle. Per-column width fits tightest name."
   (let* ((L (agent-shell-dispatch-render--derived-layout))
          (font (agent-shell-dispatch-render-theme-font theme))
@@ -650,10 +658,10 @@ Filled box = busy, hollow box = idle. Per-column width fits tightest name."
              (col-count (length col-agents))
              (total-col-h (* row-h col-count))
              (start-y (/ (- h total-col-h) 2)))
-        (cl-loop for info in col-agents
+        (cl-loop for agent in col-agents
                  for row from 0
-                 for name = (agent-shell-dispatch-agent-info-name info)
-                 for busy = (agent-shell-dispatch-agent-info-busy info)
+                 for name = (agent-shell-dispatch-render-agent-name agent)
+                 for busy = (agent-shell-dispatch-render-agent-busy agent)
                  for by = (+ start-y (* row row-h) (/ (- row-h box-h) 2))
                  for text-y = (+ by (/ box-h 2) (agent-shell-dispatch-render--baseline-offset font-size))
                  do (if busy
@@ -936,7 +944,7 @@ Returns a render-ctx for `agent-shell-dispatch-render-draw'."
   "Draw SVG from cached CTX with STATUS-MAP and AGENTS.
 CTX is from `agent-shell-dispatch-render-prepare'.
 STATUS-MAP maps task-id to render-task-status.
-AGENTS maps buffer-name to agent-info."
+AGENTS is a list of `agent-shell-dispatch-render-agent' structs."
   (let* ((L (agent-shell-dispatch-render--derived-layout))
          (theme (agent-shell-dispatch-render--theme-colors))
          (topo (agent-shell-dispatch-render-ctx-topo ctx))
@@ -946,7 +954,7 @@ AGENTS maps buffer-name to agent-info."
          (node-positions (agent-shell-dispatch-render-ctx-node-positions ctx))
          (leveled (agent-shell-dispatch-render-topology-leveled topo))
          ;; Compute agent column width first (tight padding)
-         (agent-col-w (if (and agents (> (hash-table-count agents) 0))
+         (agent-col-w (if agents
                           (+ (agent-shell-dispatch-render--agent-column-width agents h theme) 8)
                         0))
          (svg (svg-create (+ w agent-col-w) h)))
@@ -1034,12 +1042,17 @@ DISPATCHER-BUF is the buffer name."
   svg-str)
 
 (defun agent-shell-dispatch-render-cycle-spinner ()
-  "Advance the spinner frame and update the working icon."
-  (cl-incf agent-shell-dispatch-render--spinner-index)
-  (setf (agent-shell-dispatch-render-status-style-icon
-         (cdr (assq 'working (agent-shell-dispatch-render-theme-status (agent-shell-dispatch-render--theme-colors)))))
-        (nth (% agent-shell-dispatch-render--spinner-index (length agent-shell-dispatch-render--spinner-frames))
-             agent-shell-dispatch-render--spinner-frames)))
+  "Set the working/claimed icons to the spinner frame for the current time.
+The frame follows the clock rather than a call count, so graphs in
+several shells all spin at the same rate."
+  (let ((frame (nth (% (floor (* (float-time) agent-shell-dispatch-render--spinner-fps))
+                       (length agent-shell-dispatch-render--spinner-frames))
+                    agent-shell-dispatch-render--spinner-frames))
+        (theme (agent-shell-dispatch-render-theme-status
+                (agent-shell-dispatch-render--theme-colors))))
+    (setf (agent-shell-dispatch-render-status-style-icon (cdr (assq 'working theme))) frame)
+    (when-let* ((claimed-style (cdr (assq 'claimed theme))))
+      (setf (agent-shell-dispatch-render-status-style-icon claimed-style) frame))))
 
 ;; ── Header integration ─────────────────────────────────────────────
 ;;
@@ -1062,7 +1075,7 @@ DISPATCHER-BUF is the buffer name."
 Called every frame by the header renderer.")
 
 (defvar-local agent-shell-dispatch-render-agent-activity-function nil
-  "Function of no args returning the agents hash (buffer-name -> agent-info).
+  "Function of no args returning a list of `agent-shell-dispatch-render-agent' structs.
 Called every frame to render the agent activity column.")
 
 (defvar-local agent-shell-dispatch-render-header-function nil
@@ -1076,6 +1089,13 @@ Called by the heartbeat timer.")
   "Function of no args returning non-nil when the host buffer is busy.
 When busy, the heartbeat skips since the host drives updates itself.")
 
+(defvar-local agent-shell-dispatch-render-dismiss-function nil
+  "Function of no args that dismisses this buffer's graph.
+When non-nil, the graph shows a close button that calls it when clicked.")
+
+(defvar-local agent-shell-dispatch-render--dismiss-button nil
+  "Close button bounds (X Y W H) in header SVG pixels, or nil if none is drawn.")
+
 (defvar agent-shell-dispatch-render-advice-target nil
   "Function symbol to advise with the header extend function.
 Global — only one advice installation is needed.")
@@ -1084,9 +1104,14 @@ Global — only one advice installation is needed.")
   "Timer that drives header updates while the host buffer is idle.")
 
 (defun agent-shell-dispatch-render-set-tasks (task-defs)
-  "Set TASK-DEFS and prepare the render context."
+  "Set TASK-DEFS and prepare the render context.
+With no TASK-DEFS there is nothing to draw, so the graph is cleared from
+the header until tasks are set again."
   (setq agent-shell-dispatch-render--task-defs task-defs
-        agent-shell-dispatch-render--ctx (agent-shell-dispatch-render-prepare task-defs)))
+        agent-shell-dispatch-render--ctx
+        (when task-defs (agent-shell-dispatch-render-prepare task-defs)))
+  (when (and (null task-defs) agent-shell-dispatch-render-reset-function)
+    (ignore-errors (funcall agent-shell-dispatch-render-reset-function))))
 
 (defun agent-shell-dispatch-render--heartbeat (buf)
   "Force a header update in BUF when the host buffer is idle."
@@ -1098,8 +1123,69 @@ Global — only one advice installation is needed.")
           (when agent-shell-dispatch-render-header-function
             (ignore-errors (funcall agent-shell-dispatch-render-header-function))))))))
 
+(defconst agent-shell-dispatch-render--dismiss-button-size 14
+  "Side length in pixels of the graph's close button.")
+
+(defvar agent-shell-dispatch-render--header-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map [header-line mouse-1] #'agent-shell-dispatch-render-header-click)
+    (define-key map [header-line down-mouse-1] #'ignore)
+    map)
+  "Keymap for the header image, routing clicks to the close button.")
+
+(defun agent-shell-dispatch-render--add-dismiss-button (svg-str x y)
+  "Return SVG-STR with a close button whose top-left corner is at X, Y.
+Records the button bounds for `agent-shell-dispatch-render-header-click'."
+  (let* ((size agent-shell-dispatch-render--dismiss-button-size)
+         (theme (agent-shell-dispatch-render--theme-colors))
+         (r (/ size 2.0))
+         (cx (+ x r))
+         (cy (+ y r))
+         (arm (* r 0.45)))
+    (setq agent-shell-dispatch-render--dismiss-button (list x y size size))
+    (replace-regexp-in-string
+     "</svg>\\'"
+     (format (concat "<rect id=\"agent-shell-dispatch-dismiss\" x=\"%d\" y=\"%d\" width=\"%d\" height=\"%d\" fill=\"none\"/>"
+                     "<circle cx=\"%.1f\" cy=\"%.1f\" r=\"%.1f\" fill=\"none\" stroke=\"%s\"/>"
+                     "<path d=\"M%.1f %.1fL%.1f %.1fM%.1f %.1fL%.1f %.1f\" stroke=\"%s\" stroke-width=\"1.5\" stroke-linecap=\"round\"/>"
+                     "</svg>")
+             x y size size
+             cx cy (- r 0.5) (agent-shell-dispatch-render-theme-dim theme)
+             (- cx arm) (- cy arm) (+ cx arm) (+ cy arm)
+             (- cx arm) (+ cy arm) (+ cx arm) (- cy arm)
+             (agent-shell-dispatch-render-theme-fg theme))
+     svg-str t t)))
+
+(defun agent-shell-dispatch-render--dismiss-button-hit-p (posn)
+  "Return non-nil when POSN, a header image position, is on the close button.
+Scales from displayed image pixels back to SVG pixels."
+  (when-let* ((button agent-shell-dispatch-render--dismiss-button)
+              (click (posn-object-x-y posn))
+              (shown (posn-object-width-height posn))
+              ((> (car shown) 0))
+              ((stringp header-line-format))
+              (data (plist-get (cdr (get-text-property 1 'display header-line-format)) :data))
+              (dims (agent-shell-dispatch-render--svg-dimensions data)))
+    (let ((x (* (car click) (/ (float (agent-shell-dispatch-render-dimensions-w dims)) (car shown))))
+          (y (* (cdr click) (/ (float (agent-shell-dispatch-render-dimensions-h dims)) (cdr shown)))))
+      (pcase-let ((`(,bx ,by ,bw ,bh) button))
+        (and (<= bx x (+ bx bw)) (<= by y (+ by bh)))))))
+
+(defun agent-shell-dispatch-render-header-click (event)
+  "Dismiss the clicked buffer's graph when EVENT lands on its close button."
+  (interactive "e")
+  (let* ((posn (event-start event))
+         (win (posn-window posn)))
+    (when (window-live-p win)
+      (with-current-buffer (window-buffer win)
+        (when (and agent-shell-dispatch-render-dismiss-function
+                   (agent-shell-dispatch-render--dismiss-button-hit-p posn))
+          (funcall agent-shell-dispatch-render-dismiss-function))))))
+
 (defun agent-shell-dispatch-render--extend-header (&rest _)
   "Build task graph SVG and append below the host header SVG.
+Draws a close button at the graph's top right when
+`agent-shell-dispatch-render-dismiss-function' is set.
 Buffer-local render vars ensure this is a no-op in non-dispatcher buffers."
   (when-let* ((ctx agent-shell-dispatch-render--ctx)
               (status-fn agent-shell-dispatch-render-status-function)
@@ -1113,12 +1199,27 @@ Buffer-local render vars ensure this is a no-op in non-dispatcher buffers."
            (svg (agent-shell-dispatch-render-draw ctx status-map agents))
            (graph-svg (with-temp-buffer (svg-print svg) (buffer-string)))
            (graph-svg (agent-shell-dispatch-render-apply-viewport graph-svg ctx status-map (buffer-name)))
-           (combined (agent-shell-dispatch-render-combine-svgs orig-svg graph-svg -12 10)))
+           (gap-above -12)
+           (combined (agent-shell-dispatch-render-combine-svgs orig-svg graph-svg gap-above 10)))
+      (setq agent-shell-dispatch-render--dismiss-button nil)
       (when combined
+        (when agent-shell-dispatch-render-dismiss-function
+          (setq combined
+                (agent-shell-dispatch-render--add-dismiss-button
+                 combined
+                 (- (agent-shell-dispatch-render-dimensions-w
+                     (agent-shell-dispatch-render--svg-dimensions combined))
+                    agent-shell-dispatch-render--dismiss-button-size 6)
+                 (+ (agent-shell-dispatch-render-dimensions-h
+                     (agent-shell-dispatch-render--svg-dimensions orig-svg))
+                    gap-above 4))))
         (setq header-line-format
               (format " %s" (propertize " " 'display
                                         (list 'image :type 'svg
-                                              :data combined :scale 'default))))))))
+                                              :data combined :scale 'default)
+                                        'keymap agent-shell-dispatch-render--header-map
+                                        'help-echo (when agent-shell-dispatch-render-dismiss-function
+                                                     "mouse-1 on \u00d7: dismiss the task graph"))))))))
 
 (defun agent-shell-dispatch-render--on-theme-change (&rest _)
   "Recompute theme and re-prepare geometry on theme change.
@@ -1140,9 +1241,6 @@ Requires `agent-shell-dispatch-render-global-mode' for the advice."
   (if agent-shell-dispatch-render-mode
       (if (null agent-shell-dispatch-render--ctx)
           (setq agent-shell-dispatch-render-mode nil)
-        ;; Auto-enable global mode if not already on
-        (unless (bound-and-true-p agent-shell-dispatch-global-mode)
-          (agent-shell-dispatch-global-mode 1))
         ;; Buffer-local heartbeat timer
         (let ((buf (current-buffer)))
           (setq agent-shell-dispatch-render--heartbeat-timer
@@ -1160,7 +1258,9 @@ Requires `agent-shell-dispatch-render-global-mode' for the advice."
   "Hook run during teardown for clearing external state.")
 
 (defun agent-shell-dispatch-render-teardown ()
-  "Disable rendering and clear all render state and hooks."
+  "Disable rendering and clear the current buffer's render state and hooks.
+The global `agent-shell-dispatch-render-advice-target' is left alone, since
+other buffers may still be rendering."
   (when agent-shell-dispatch-render-mode
     (agent-shell-dispatch-render-mode 'toggle))
   (run-hooks 'agent-shell-dispatch-render-teardown-hook)
@@ -1172,7 +1272,8 @@ Requires `agent-shell-dispatch-render-global-mode' for the advice."
         agent-shell-dispatch-render-header-function nil
         agent-shell-dispatch-render-reset-function nil
         agent-shell-dispatch-render-busy-p-function nil
-        agent-shell-dispatch-render-advice-target nil
+        agent-shell-dispatch-render-dismiss-function nil
+        agent-shell-dispatch-render--dismiss-button nil
         agent-shell-dispatch-render-teardown-hook nil))
 
 (provide 'agent-shell-dispatch-render)
